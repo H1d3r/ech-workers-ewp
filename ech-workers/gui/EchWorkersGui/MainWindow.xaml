@@ -155,7 +155,7 @@
     <Border Grid.Row="1" Grid.ColumnSpan="2" BorderBrush="#2D2D30" BorderThickness="0,1,0,0" Padding="12">
       <DockPanel>
         <TextBlock DockPanel.Dock="Top" Text="日志" Margin="0,0,0,8"/>
-        <TextBox Text="{Binding LogText}" IsReadOnly="True" FontFamily="Consolas" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+        <TextBox Text="{Binding LogText, Mode=OneWay}" IsReadOnly="True" FontFamily="Consolas" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
       </DockPanel>
     </Border>
   </Grid>
