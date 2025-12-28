@@ -114,7 +114,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ech-workers-core
-          path: client
+          path: kernel
 
       - name: Download Proxy Server
         uses: actions/download-artifact@v4
@@ -126,23 +126,39 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: gui
-          path: client
+          path: gui
 
-      - name: Package Client (Kernel + GUI)
+      - name: Package by architecture
         run: |
-          cd client
-          zip -r ../ech-workers-client.zip .
+          mkdir -p release
 
-      - name: Package Server
-        run: |
-          cd server
-          zip -r ../proxy-server.zip .
+          # Client Windows amd64 (kernel + GUI)
+          mkdir -p tmp/client-win-amd64
+          cp kernel/ech-workers-core-windows-amd64.exe tmp/client-win-amd64/ech-workers-core.exe
+          cp gui/EchWorkersGui-x64.exe tmp/client-win-amd64/EchWorkersGui.exe
+          cd tmp/client-win-amd64 && zip -r ../../release/ech-workers-client-windows-amd64.zip . && cd ../..
+
+          # Client Windows arm64 (kernel + GUI)
+          mkdir -p tmp/client-win-arm64
+          cp kernel/ech-workers-core-windows-arm64.exe tmp/client-win-arm64/ech-workers-core.exe
+          cp gui/EchWorkersGui-arm64.exe tmp/client-win-arm64/EchWorkersGui.exe
+          cd tmp/client-win-arm64 && zip -r ../../release/ech-workers-client-windows-arm64.zip . && cd ../..
+
+          # Server Windows amd64
+          mkdir -p tmp/server-win-amd64
+          cp server/proxy-server-windows-amd64.exe tmp/server-win-amd64/proxy-server.exe
+          cd tmp/server-win-amd64 && zip -r ../../release/proxy-server-windows-amd64.zip . && cd ../..
+
+          # Server Linux amd64
+          mkdir -p tmp/server-linux-amd64
+          cp server/proxy-server-linux-amd64 tmp/server-linux-amd64/proxy-server
+          cd tmp/server-linux-amd64 && zip -r ../../release/proxy-server-linux-amd64.zip . && cd ../..
+
+          ls -lh release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            ech-workers-client.zip
-            proxy-server.zip
+          files: release/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
