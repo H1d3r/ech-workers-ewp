@@ -58,18 +58,19 @@ public sealed class MainViewModel : ObservableObject
 
     public MainViewModel()
     {
-        var cfg = _configService.Load();
-        Global = cfg.Global;
-
-        Nodes = new ObservableCollection<NodeConfig>(cfg.Nodes);
-        SelectedNode = Nodes.FirstOrDefault(n => n.Id == cfg.SelectedNodeId) ?? Nodes.FirstOrDefault();
-
+        // 先初始化 Commands（必须在设置 SelectedNode 之前，否则 RaiseCommandStates 会空引用）
         AddNodeCommand = new RelayCommand(AddNode);
         DeleteNodeCommand = new RelayCommand(DeleteSelectedNode, () => HasSelectedNode && !_isRunning);
         SaveAllCommand = new RelayCommand(SaveAll);
         StartCoreCommand = new RelayCommand(async () => await StartCoreAsync(), () => CanStart);
         StopCoreCommand = new RelayCommand(async () => await StopCoreAsync(), () => CanStop);
         BrowseCorePathCommand = new RelayCommand(BrowseCorePath);
+
+        var cfg = _configService.Load();
+        Global = cfg.Global;
+
+        Nodes = new ObservableCollection<NodeConfig>(cfg.Nodes);
+        SelectedNode = Nodes.FirstOrDefault(n => n.Id == cfg.SelectedNodeId) ?? Nodes.FirstOrDefault();
 
         _core.OnLogLine += line => Application.Current.Dispatcher.Invoke(() => AppendLog(line));
         _core.OnExited += () => Application.Current.Dispatcher.Invoke(() =>
