@@ -11,5 +11,15 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <!-- 确保包含所有 WPF 依赖 -->
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <!-- 应用程序图标 -->
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="1.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\app.ico" />
+  </ItemGroup>
 </Project>

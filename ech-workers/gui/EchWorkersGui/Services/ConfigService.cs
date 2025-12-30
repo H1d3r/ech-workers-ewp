@@ -17,7 +17,9 @@ public sealed class ConfigService
 
     public ConfigService()
     {
-        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "EchWorkersGui");
+        // 配置文件放在程序根目录的 config 文件夹下
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        var dir = Path.Combine(baseDir, "config");
         Directory.CreateDirectory(dir);
         ConfigFilePath = Path.Combine(dir, "config.json");
     }

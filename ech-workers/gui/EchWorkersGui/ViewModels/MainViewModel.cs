@@ -63,7 +63,7 @@ public sealed class MainViewModel : ObservableObject
         DeleteNodeCommand = new RelayCommand(DeleteSelectedNode, () => HasSelectedNode && !_isRunning);
         SaveAllCommand = new RelayCommand(SaveAll);
         StartCoreCommand = new RelayCommand(async () => await StartCoreAsync(), () => CanStart);
-        StopCoreCommand = new RelayCommand(async () => await StopCoreAsync(), () => CanStop);
+        StopCoreCommand = new RelayCommand(async () => await StopCoreInternalAsync(), () => CanStop);
         BrowseCorePathCommand = new RelayCommand(BrowseCorePath);
 
         var cfg = _configService.Load();
@@ -211,7 +211,7 @@ public sealed class MainViewModel : ObservableObject
 
         if (Global.EnableTun && !CoreProcessService.IsAdministrator())
         {
-            var logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "EchWorkersGui");
+            var logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
             Directory.CreateDirectory(logDir);
             var logFile = Path.Combine(logDir, "core.log");
 
@@ -287,12 +287,17 @@ public sealed class MainViewModel : ObservableObject
         await Task.CompletedTask;
     }
 
-    private async Task StopCoreAsync()
+    private async Task StopCoreInternalAsync()
     {
         AppendLog("[GUI] 正在停止内核...");
         await _core.StopAsync();
         _isRunning = false;
         StatusText = "未运行";
         RaiseCommandStates();
+    }
+
+    public async Task StopCoreAsync()
+    {
+        await StopCoreInternalAsync();
     }
 }
