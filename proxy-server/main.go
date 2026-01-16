@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	pb "proxy-server/proto"
@@ -24,6 +25,22 @@ var (
 	port     = getEnv("PORT", "8080")
 	grpcMode = false
 	upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+)
+
+// ======================== Buffer Pool (性能优化) ========================
+
+var (
+	smallBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 512)
+		},
+	}
+
+	largeBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 32*1024)
+		},
+	}
 )
 
 func getEnv(key, def string) string {
@@ -150,13 +167,17 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 	// remote -> gRPC
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 32*1024)
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+
 		for {
 			n, err := remote.Read(buf)
 			if err != nil {
 				return
 			}
-			if err := stream.Send(&pb.SocketData{Content: buf[:n]}); err != nil {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			if err := stream.Send(&pb.SocketData{Content: data}); err != nil {
 				return
 			}
 		}
@@ -352,13 +373,17 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 	// remote -> WebSocket
 	go func() {
 		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 32*1024)
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+
 		for {
 			n, err := remote.Read(buf)
 			if err != nil {
 				return
 			}
-			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 				return
 			}
 		}
@@ -377,10 +402,14 @@ func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte) {
 		firstFrameRead: false,
 	}
 
-	// Create yamux server session
+	// Create yamux server session（性能优化配置）
 	cfg := yamux.DefaultConfig()
 	cfg.EnableKeepAlive = true
 	cfg.KeepAliveInterval = 30 * time.Second
+	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
+	cfg.InitialWindowSize = 512 * 1024
+	cfg.StreamOpenTimeout = 15 * time.Second
+	cfg.StreamCloseTimeout = 5 * time.Second
 
 	session, err := yamux.Server(ws, cfg)
 	if err != nil {
@@ -388,6 +417,22 @@ func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte) {
 		return
 	}
 	defer session.Close()
+
+	// 启动定期内存回收
+	stopShrink := make(chan struct{})
+	defer close(stopShrink)
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				session.Shrink()
+			case <-stopShrink:
+				return
+			}
+		}
+	}()
 
 	// Accept streams
 	for {
@@ -442,10 +487,14 @@ func (c *wsConnWithBuffer) Write(p []byte) (int, error) {
 func handleYamux(conn *websocket.Conn) {
 	ws := &wsConn{Conn: conn}
 
-	// Create yamux server session
+	// Create yamux server session（性能优化配置）
 	cfg := yamux.DefaultConfig()
 	cfg.EnableKeepAlive = true
 	cfg.KeepAliveInterval = 30 * time.Second
+	cfg.MaxStreamWindowSize = 4 * 1024 * 1024
+	cfg.InitialWindowSize = 512 * 1024
+	cfg.StreamOpenTimeout = 15 * time.Second
+	cfg.StreamCloseTimeout = 5 * time.Second
 
 	session, err := yamux.Server(ws, cfg)
 	if err != nil {
@@ -453,6 +502,22 @@ func handleYamux(conn *websocket.Conn) {
 		return
 	}
 	defer session.Close()
+
+	// 启动定期内存回收
+	stopShrink := make(chan struct{})
+	defer close(stopShrink)
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				session.Shrink()
+			case <-stopShrink:
+				return
+			}
+		}
+	}()
 
 	// Accept streams
 	for {
@@ -471,9 +536,10 @@ func handleStream(stream net.Conn) {
 	defer stream.Close()
 
 	// First read: target address "host:port\n" (newline delimited)
-	buf := make([]byte, 512)
+	buf := smallBufferPool.Get().([]byte)
 	n, err := stream.Read(buf)
 	if err != nil {
+		smallBufferPool.Put(buf)
 		return
 	}
 
@@ -494,12 +560,15 @@ func handleStream(stream net.Conn) {
 	if newlineIdx >= 0 {
 		target = string(data[:newlineIdx])
 		if newlineIdx+1 < len(data) {
-			extraData = data[newlineIdx+1:]
+			extraData = make([]byte, len(data[newlineIdx+1:]))
+			copy(extraData, data[newlineIdx+1:])
 		}
 	} else {
 		// Fallback: no newline, treat entire data as target
 		target = strings.TrimSpace(string(data))
 	}
+
+	smallBufferPool.Put(buf)
 
 	parts := strings.SplitN(target, ":", 2)
 	if len(parts) != 2 {
