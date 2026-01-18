@@ -3,9 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"flag"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +29,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -58,6 +67,51 @@ func getEnv(key, def string) string {
 
 // Nginx disguise page
 const nginxHTML = `<!DOCTYPE html><html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>`
+
+// ======================== 自签名证书生成 ========================
+
+func generateSelfSignedCert() (tls.Certificate, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"ECH Workers Proxy"},
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	privBytes, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes})
+
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
 
 func main() {
 	// 解析命令行参数
@@ -210,6 +264,17 @@ func parseGRPCConnect(data []byte) (target string, extraData []byte) {
 }
 
 func startGRPCServer() {
+	cert, err := generateSelfSignedCert()
+	if err != nil {
+		log.Fatalf("❌ Failed to generate self-signed cert: %v", err)
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	creds := credentials.NewTLS(tlsConfig)
+
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		log.Fatalf("❌ gRPC listen failed: %v", err)
@@ -225,6 +290,7 @@ func startGRPCServer() {
 	}
 
 	s := grpc.NewServer(
+		grpc.Creds(creds),
 		grpc.KeepaliveParams(kasp),
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.MaxConcurrentStreams(100),
@@ -243,6 +309,7 @@ func startGRPCServer() {
 		s.GracefulStop()
 	}()
 
+	log.Println("🔒 gRPC server with TLS enabled")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("❌ gRPC serve failed: %v", err)
 	}
