@@ -108,44 +108,44 @@ jobs:
           name: proxy-server-tls
           path: artifacts/proxy-server-tls-*
 
-  build-gui:
-    name: Build GUI (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
+  # build-gui:
+  #   name: Build GUI (Windows)
+  #   runs-on: windows-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
+  #     - name: Setup .NET
+  #       uses: actions/setup-dotnet@v4
+  #       with:
+  #         dotnet-version: '8.0.x'
 
-      - name: Publish GUI win-x64
-        shell: pwsh
-        run: |
-          cd ech-workers/gui/EchWorkersGui
-          dotnet publish -c Release -r win-x64 --self-contained true -o ..\..\..\artifacts\gui-win-x64
+  #     - name: Publish GUI win-x64
+  #       shell: pwsh
+  #       run: |
+  #         cd ech-workers/gui/EchWorkersGui
+  #         dotnet publish -c Release -r win-x64 --self-contained true -o ..\..\..\artifacts\gui-win-x64
 
-      - name: Publish GUI win-arm64
-        shell: pwsh
-        run: |
-          cd ech-workers/gui/EchWorkersGui
-          dotnet publish -c Release -r win-arm64 --self-contained true -o ..\..\..\artifacts\gui-win-arm64
+  #     - name: Publish GUI win-arm64
+  #       shell: pwsh
+  #       run: |
+  #         cd ech-workers/gui/EchWorkersGui
+  #         dotnet publish -c Release -r win-arm64 --self-contained true -o ..\..\..\artifacts\gui-win-arm64
 
-      - name: Upload GUI x64 Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-x64
-          path: artifacts/gui-win-x64/
+  #     - name: Upload GUI x64 Artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: gui-x64
+  #         path: artifacts/gui-win-x64/
 
-      - name: Upload GUI arm64 Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-arm64
-          path: artifacts/gui-win-arm64/
+  #     - name: Upload GUI arm64 Artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: gui-arm64
+  #         path: artifacts/gui-win-arm64/
 
   release:
     name: Create Release
-    needs: [build-client-kernel, build-proxy-server, build-proxy-server-tls, build-gui]
+    needs: [build-client-kernel, build-proxy-server, build-proxy-server-tls]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -174,33 +174,31 @@ jobs:
           name: proxy-server-tls
           path: server-tls
 
-      - name: Download GUI x64
-        uses: actions/download-artifact@v4
-        with:
-          name: gui-x64
-          path: gui-x64
+      # - name: Download GUI x64
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: gui-x64
+      #     path: gui-x64
 
-      - name: Download GUI arm64
-        uses: actions/download-artifact@v4
-        with:
-          name: gui-arm64
-          path: gui-arm64
+      # - name: Download GUI arm64
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: gui-arm64
+      #     path: gui-arm64
 
       - name: Package by architecture
         run: |
           mkdir -p release
 
-          # Client Windows amd64 (kernel + GUI目录 + wintun.dll)
+          # Client Windows amd64 (kernel + wintun.dll)
           mkdir -p tmp/client-win-amd64
           cp kernel/ech-workers-core-windows-amd64.exe tmp/client-win-amd64/ech-workers-core.exe
-          cp -r gui-x64/* tmp/client-win-amd64/
           cp ech-workers/wintun.dll tmp/client-win-amd64/wintun.dll
           (cd tmp/client-win-amd64 && zip -r ../../release/ech-workers-client-windows-amd64.zip .)
 
-          # Client Windows arm64 (kernel + GUI目录 + wintun.dll)
+          # Client Windows arm64 (kernel + wintun.dll)
           mkdir -p tmp/client-win-arm64
           cp kernel/ech-workers-core-windows-arm64.exe tmp/client-win-arm64/ech-workers-core.exe
-          cp -r gui-arm64/* tmp/client-win-arm64/
           cp ech-workers/wintun.dll tmp/client-win-arm64/wintun.dll
           (cd tmp/client-win-arm64 && zip -r ../../release/ech-workers-client-windows-arm64.zip .)
 
@@ -235,7 +233,7 @@ jobs:
           body: |
             ## 📦 下载说明
 
-            - **ech-workers-client-*.zip** - 客户端完整包（GUI + 内核 + wintun.dll）
+            - **ech-workers-client-*.zip** - 客户端核心包（内核 + wintun.dll，命令行使用）
             - **proxy-server-*.zip** - 代理服务端（HTTP/WebSocket）
             - **proxy-server-tls-*.zip** - 代理服务端 TLS 版本（gRPC over TLS + HTTP/2，配合 cloudflared tunnel 使用）
 
@@ -246,3 +244,4 @@ jobs:
             - 支持 SOCKS5 / HTTP 代理
             - 支持 TUN 模式（全局代理）
             - gRPC 模式支持 TLS 自签名证书（适配 cloudflared --no-tls-verify）
+            - **新增 EWP (ECH-Worker Protocol) 协议** - 自定义应用层协议，提供加密握手和动态混淆

@@ -87,6 +87,10 @@ func main() {
 
 	log.Printf("🔑 UUID: %s", uuid)
 
+	if err := initEWPHandler(uuid); err != nil {
+		log.Fatalf("❌ Failed to initialize EWP handler: %v", err)
+	}
+
 	if grpcMode {
 		// gRPC 模式
 		log.Printf("🚀 gRPC server listening on :%s", port)
@@ -119,58 +123,36 @@ type proxyServer struct {
 }
 
 func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
-	// 从 metadata 获取 UUID 进行鉴权
-	md, ok := metadata.FromIncomingContext(stream.Context())
-	if !ok {
-		log.Printf("❌ gRPC: 无法获取 metadata")
-		return nil
-	}
+	log.Println("🔗 gRPC client connected")
 
-	uuids := md.Get("uuid")
-	if len(uuids) == 0 || uuids[0] != uuid {
-		log.Printf("❌ gRPC: UUID 验证失败")
-		return nil
-	}
-
-	log.Println("✅ gRPC client connected")
-
-	// 读取第一个消息获取目标地址
 	firstMsg, err := stream.Recv()
 	if err != nil {
-		log.Printf("❌ gRPC: 读取首包失败: %v", err)
+		log.Printf("❌ gRPC: 读取握手失败: %v", err)
 		return err
 	}
 
-	data := firstMsg.GetContent()
-	target, extraData := parseGRPCConnect(data)
-	if target == "" {
-		log.Printf("❌ gRPC: 无效的目标地址")
-		stream.Send(&pb.SocketData{Content: []byte("ERROR:invalid target")})
+	req, respData, err := handleEWPHandshakeBinary(firstMsg.GetContent())
+	if err != nil {
+		stream.Send(&pb.SocketData{Content: respData})
 		return nil
 	}
 
+	if err := stream.Send(&pb.SocketData{Content: respData}); err != nil {
+		log.Printf("❌ gRPC: 发送握手响应失败: %v", err)
+		return err
+	}
+
+	target := req.TargetAddr.String()
 	log.Printf("🔗 gRPC connecting to %s", target)
 
-	// 连接目标
 	remote, err := net.Dial("tcp", target)
 	if err != nil {
 		log.Printf("❌ gRPC dial error: %v", err)
-		stream.Send(&pb.SocketData{Content: []byte("ERROR:" + err.Error())})
 		return nil
 	}
 	defer remote.Close()
 
 	log.Printf("✅ gRPC connected to %s", target)
-
-	// 发送连接成功响应
-	if err := stream.Send(&pb.SocketData{Content: []byte("CONNECTED")}); err != nil {
-		return err
-	}
-
-	// 发送额外数据
-	if len(extraData) > 0 {
-		remote.Write(extraData)
-	}
 
 	// 双向转发
 	done := make(chan struct{}, 2)
@@ -683,73 +665,54 @@ func (c *wsConn) Write(p []byte) (int, error) {
 	return len(p), err
 }
 
-// handleWebSocket 自动检测客户端协议：Yamux 或简单文本协议
+// handleWebSocket 自动检测客户端协议：Yamux 或 EWP 简单模式
 func handleWebSocket(conn *websocket.Conn) {
-	// 读取第一帧数据来判断协议类型
 	_, firstMsg, err := conn.ReadMessage()
 	if err != nil {
 		log.Printf("❌ Read first message error: %v", err)
 		return
 	}
 
-	// Yamux 协议的 magic number: 0x00 0x00 (version + type)
-	// 简单协议以 "CONNECT:" 开头
-	if len(firstMsg) >= 2 && firstMsg[0] == 0x00 {
-		// Yamux 协议
+	if len(firstMsg) < 15 {
+		log.Printf("❌ Message too short: %d bytes", len(firstMsg))
+		return
+	}
+
+	// Yamux 协议的 magic: 第一个字节是 0x00（version）
+	// EWP 协议：第一个字节是随机 1-255（version）
+	if firstMsg[0] == 0x00 {
 		log.Println("🔄 Detected Yamux protocol")
 		handleYamuxWithFirstFrame(conn, firstMsg)
-	} else if strings.HasPrefix(string(firstMsg), "CONNECT:") {
-		// 简单文本协议
-		log.Println("🔄 Detected simple protocol")
-		handleSimpleProtocol(conn, firstMsg)
 	} else {
-		log.Printf("❌ Unknown protocol, first bytes: %v", firstMsg[:min(len(firstMsg), 16)])
-		return
+		log.Println("🔄 Detected EWP simple protocol")
+		handleSimpleProtocol(conn, firstMsg)
 	}
 }
 
-// handleSimpleProtocol 处理简单文本协议（兼容 Cloudflare Workers）
+// handleSimpleProtocol 处理 EWP 协议（简单 WebSocket 模式）
 func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
-	// 解析 CONNECT:host:port|data
-	msg := string(firstMsg)
-	if !strings.HasPrefix(msg, "CONNECT:") {
-		conn.WriteMessage(websocket.TextMessage, []byte("ERROR:invalid message"))
+	req, respData, err := handleEWPHandshakeBinary(firstMsg)
+	if err != nil {
+		conn.WriteMessage(websocket.BinaryMessage, respData)
 		return
 	}
 
-	msg = strings.TrimPrefix(msg, "CONNECT:")
-	idx := strings.Index(msg, "|")
-	var target string
-	var extraData []byte
-	if idx >= 0 {
-		target = msg[:idx]
-		extraData = []byte(msg[idx+1:])
-	} else {
-		target = msg
+	if err := conn.WriteMessage(websocket.BinaryMessage, respData); err != nil {
+		log.Printf("❌ Failed to send handshake response: %v", err)
+		return
 	}
 
-	log.Printf("🔗 Simple: connecting to %s", target)
+	target := req.TargetAddr.String()
+	log.Printf("🔗 Simple WebSocket connecting to %s", target)
 
-	// 连接目标
 	remote, err := net.Dial("tcp", target)
 	if err != nil {
 		log.Printf("❌ Dial error: %v", err)
-		conn.WriteMessage(websocket.TextMessage, []byte("ERROR:"+err.Error()))
 		return
 	}
 	defer remote.Close()
 
-	// 发送连接成功响应
-	if err := conn.WriteMessage(websocket.TextMessage, []byte("CONNECTED")); err != nil {
-		return
-	}
-
-	log.Printf("✅ Simple: connected to %s", target)
-
-	// 发送额外数据
-	if len(extraData) > 0 {
-		remote.Write(extraData)
-	}
+	log.Printf("✅ Simple WebSocket connected to %s", target)
 
 	// 双向转发
 	done := make(chan struct{}, 2)
@@ -903,64 +866,28 @@ func handleYamux(conn *websocket.Conn) {
 func handleStream(stream net.Conn) {
 	defer stream.Close()
 
-	// First read: target address "host:port\n" (newline delimited)
-	buf := smallBufferPool.Get().([]byte)
-	n, err := stream.Read(buf)
+	req, respData, err := handleEWPHandshake(stream)
 	if err != nil {
-		smallBufferPool.Put(buf)
+		stream.Write(respData)
 		return
 	}
 
-	data := buf[:n]
-	
-	// Find newline delimiter
-	newlineIdx := -1
-	for i, b := range data {
-		if b == '\n' {
-			newlineIdx = i
-			break
-		}
-	}
-
-	var target string
-	var extraData []byte
-	
-	if newlineIdx >= 0 {
-		target = string(data[:newlineIdx])
-		if newlineIdx+1 < len(data) {
-			extraData = make([]byte, len(data[newlineIdx+1:]))
-			copy(extraData, data[newlineIdx+1:])
-		}
-	} else {
-		// Fallback: no newline, treat entire data as target
-		target = strings.TrimSpace(string(data))
-	}
-
-	smallBufferPool.Put(buf)
-
-	parts := strings.SplitN(target, ":", 2)
-	if len(parts) != 2 {
-		log.Printf("❌ Invalid target: %s", target)
+	if _, err := stream.Write(respData); err != nil {
+		log.Printf("❌ Failed to send handshake response: %v", err)
 		return
 	}
 
-	host, port := parts[0], parts[1]
-	log.Printf("🔗 Connecting to %s:%s", host, port)
+	target := req.TargetAddr.String()
+	log.Printf("🔗 Yamux stream connecting to %s", target)
 
-	// Connect to target
-	remote, err := net.Dial("tcp", host+":"+port)
+	remote, err := net.Dial("tcp", target)
 	if err != nil {
 		log.Printf("❌ Dial error: %v", err)
 		return
 	}
 	defer remote.Close()
 
-	log.Printf("✅ Connected to %s:%s", host, port)
-
-	// Send extra data that came with target address (e.g., HTTP request)
-	if len(extraData) > 0 {
-		remote.Write(extraData)
-	}
+	log.Printf("✅ Yamux stream connected to %s", target)
 
 	// Bidirectional copy
 	done := make(chan struct{})

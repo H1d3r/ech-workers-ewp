@@ -48,41 +48,41 @@ jobs:
           name: kernel-binaries
           path: ech-workers-core-*
 
-  build-gui:
-    name: Build GUI (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-      
-      - name: Build GUI Windows x64
-        run: |
-          cd gui/EchWorkersGui
-          dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ../../build-x64
-      
-      - name: Build GUI Windows arm64
-        run: |
-          cd gui/EchWorkersGui
-          dotnet publish -c Release -r win-arm64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ../../build-arm64
-      
-      - name: Rename GUI binaries
-        run: |
-          mv build-x64/EchWorkersGui.exe EchWorkersGui-x64.exe
-          mv build-arm64/EchWorkersGui.exe EchWorkersGui-arm64.exe
-      
-      - name: Upload GUI Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-binaries
-          path: EchWorkersGui-*.exe
+  # build-gui:
+  #   name: Build GUI (Windows)
+  #   runs-on: windows-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     
+  #     - name: Setup .NET
+  #       uses: actions/setup-dotnet@v4
+  #       with:
+  #         dotnet-version: '8.0.x'
+  #     
+  #     - name: Build GUI Windows x64
+  #       run: |
+  #         cd gui/EchWorkersGui
+  #         dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ../../build-x64
+  #     
+  #     - name: Build GUI Windows arm64
+  #       run: |
+  #         cd gui/EchWorkersGui
+  #         dotnet publish -c Release -r win-arm64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ../../build-arm64
+  #     
+  #     - name: Rename GUI binaries
+  #       run: |
+  #         mv build-x64/EchWorkersGui.exe EchWorkersGui-x64.exe
+  #         mv build-arm64/EchWorkersGui.exe EchWorkersGui-arm64.exe
+  #     
+  #     - name: Upload GUI Artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: gui-binaries
+  #         path: EchWorkersGui-*.exe
 
   release:
     name: Create Release
-    needs: [build-kernel, build-gui]
+    needs: [build-kernel]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -92,11 +92,11 @@ jobs:
           name: kernel-binaries
           path: ./release
       
-      - name: Download GUI Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: gui-binaries
-          path: ./release
+      # - name: Download GUI Artifacts
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: gui-binaries
+      #     path: ./release
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
