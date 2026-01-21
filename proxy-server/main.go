@@ -21,7 +21,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
 var (
@@ -192,24 +191,6 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 
 	<-done
 	return nil
-}
-
-func parseGRPCConnect(data []byte) (target string, extraData []byte) {
-	// 格式: "CONNECT:host:port|extra_data"
-	str := string(data)
-	if !strings.HasPrefix(str, "CONNECT:") {
-		return "", nil
-	}
-
-	str = strings.TrimPrefix(str, "CONNECT:")
-	idx := strings.Index(str, "|")
-	if idx < 0 {
-		return str, nil
-	}
-
-	target = str[:idx]
-	extraData = data[len("CONNECT:")+idx+1:]
-	return target, extraData
 }
 
 func startGRPCServer() {
