@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	pb "ech-client/proto"
+	"ech-client/ewp"
 
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
@@ -28,6 +30,25 @@ var bufferPool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 32*1024)
 	},
+}
+
+// ======================== UUID 处理 ========================
+
+func parseUUID(s string) ([16]byte, error) {
+	var uuid [16]byte
+	s = strings.ReplaceAll(s, "-", "")
+	
+	if len(s) != 32 {
+		return uuid, fmt.Errorf("invalid UUID length: %d", len(s))
+	}
+	
+	decoded, err := hex.DecodeString(s)
+	if err != nil {
+		return uuid, fmt.Errorf("invalid UUID hex: %w", err)
+	}
+	
+	copy(uuid[:], decoded)
+	return uuid, nil
 }
 
 // ======================== Transport 接口定义 ========================
@@ -60,6 +81,7 @@ type WebSocketTransport struct {
 	serverAddr string
 	serverIP   string
 	token      string
+	uuid       [16]byte
 	useTLS     bool
 	useECH     bool
 	useYamux   bool
@@ -71,10 +93,16 @@ type WebSocketTransport struct {
 }
 
 func NewWebSocketTransport(serverAddr, serverIP, token string, useECH, useYamux bool) *WebSocketTransport {
+	uuid, err := parseUUID(token)
+	if err != nil {
+		log.Printf("[警告] 无法解析 UUID，将使用 token 原值: %v", err)
+	}
+
 	t := &WebSocketTransport{
 		serverAddr: serverAddr,
 		serverIP:   serverIP,
 		token:      token,
+		uuid:       uuid,
 		useTLS:     true,
 		useECH:     useECH,
 		useYamux:   useYamux,
@@ -117,7 +145,7 @@ func (t *WebSocketTransport) Dial() (TunnelConn, error) {
 	if t.session != nil && !t.session.IsClosed() {
 		stream, err := t.session.Open()
 		if err == nil {
-			return &YamuxStreamConn{stream: stream}, nil
+			return &YamuxStreamConn{stream: stream, uuid: t.uuid}, nil
 		}
 		// session 失效（可能底层 WebSocket 已断开），关闭并重建
 		log.Printf("[Yamux] session.Open 失败，重建连接: %v", err)
@@ -212,7 +240,7 @@ func (t *WebSocketTransport) Dial() (TunnelConn, error) {
 	}
 
 	logV("[Yamux] 新建 session 并打开 stream")
-	return &YamuxStreamConn{stream: stream}, nil
+	return &YamuxStreamConn{stream: stream, uuid: t.uuid}, nil
 }
 
 func (t *WebSocketTransport) startShrinkWorker() {
@@ -293,41 +321,63 @@ func (t *WebSocketTransport) dialSimple() (TunnelConn, error) {
 	}
 
 	logV("[WebSocket] 新建简单协议连接")
-	return &SimpleWSConn{conn: wsConn}, nil
+	return &SimpleWSConn{conn: wsConn, uuid: t.uuid}, nil
 }
 
-// SimpleWSConn 简单 WebSocket 连接实现（兼容 Cloudflare Workers 协议）
+// SimpleWSConn 简单 WebSocket 连接实现（使用 EWP 协议）
 type SimpleWSConn struct {
 	conn      *websocket.Conn
+	uuid      [16]byte
 	connected bool
 	mu        sync.Mutex
+	version   byte
+	nonce     [12]byte
 }
 
 func (c *SimpleWSConn) Connect(target string, initialData []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 发送 CONNECT 消息：CONNECT:host:port|initialData
-	connectMsg := fmt.Sprintf("CONNECT:%s|%s", target, string(initialData))
-	if err := c.conn.WriteMessage(websocket.TextMessage, []byte(connectMsg)); err != nil {
-		return err
-	}
-
-	// 等待 CONNECTED 响应
-	_, msg, err := c.conn.ReadMessage()
+	addr, err := ewp.ParseAddress(target)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse address: %w", err)
 	}
 
-	response := string(msg)
-	if strings.HasPrefix(response, "ERROR:") {
-		return errors.New(response)
+	req := ewp.NewHandshakeRequest(c.uuid, ewp.CommandTCP, addr)
+	c.version = req.Version
+	c.nonce = req.Nonce
+
+	handshakeData, err := req.Encode()
+	if err != nil {
+		return fmt.Errorf("encode handshake: %w", err)
 	}
-	if response != "CONNECTED" {
-		return fmt.Errorf("unexpected response: %s", response)
+
+	if err := c.conn.WriteMessage(websocket.BinaryMessage, handshakeData); err != nil {
+		return fmt.Errorf("send handshake: %w", err)
+	}
+
+	_, respData, err := c.conn.ReadMessage()
+	if err != nil {
+		return fmt.Errorf("read handshake response: %w", err)
+	}
+
+	resp, err := ewp.DecodeHandshakeResponse(respData, c.version, c.nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode handshake response: %w", err)
+	}
+
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("handshake failed with status: %d", resp.Status)
+	}
+
+	if len(initialData) > 0 {
+		if err := c.conn.WriteMessage(websocket.BinaryMessage, initialData); err != nil {
+			return fmt.Errorf("send initial data: %w", err)
+		}
 	}
 
 	c.connected = true
+	logV("[EWP] 握手成功，目标: %s", target)
 	return nil
 }
 
@@ -449,20 +499,47 @@ func (c *wsConnAdapter) SetWriteDeadline(t time.Time) error {
 // YamuxStreamConn Yamux stream 连接实现
 type YamuxStreamConn struct {
 	stream net.Conn
+	uuid   [16]byte
 }
 
 func (c *YamuxStreamConn) Connect(target string, initialData []byte) error {
-	// Yamux 协议：发送 "host:port\n" + 可选的初始数据
-	connectMsg := target + "\n"
-	if _, err := c.stream.Write([]byte(connectMsg)); err != nil {
-		return err
+	addr, err := ewp.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("parse address: %w", err)
 	}
-	// 如果有初始数据，一并发送
+
+	req := ewp.NewHandshakeRequest(c.uuid, ewp.CommandTCP, addr)
+
+	handshakeData, err := req.Encode()
+	if err != nil {
+		return fmt.Errorf("encode handshake: %w", err)
+	}
+
+	if _, err := c.stream.Write(handshakeData); err != nil {
+		return fmt.Errorf("send handshake: %w", err)
+	}
+
+	respData, err := ewp.ReadHandshake(c.stream)
+	if err != nil {
+		return fmt.Errorf("read handshake response: %w", err)
+	}
+
+	resp, err := ewp.DecodeHandshakeResponse(respData, req.Version, req.Nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode handshake response: %w", err)
+	}
+
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("handshake failed with status: %d", resp.Status)
+	}
+
 	if len(initialData) > 0 {
 		if _, err := c.stream.Write(initialData); err != nil {
-			return err
+			return fmt.Errorf("send initial data: %w", err)
 		}
 	}
+
+	logV("[EWP] Yamux 握手成功，目标: %s", target)
 	return nil
 }
 
@@ -499,15 +576,22 @@ func (c *YamuxStreamConn) StartPing(interval time.Duration) chan struct{} {
 type GRPCTransport struct {
 	serverAddr string
 	serverIP   string
-	uuid       string
+	uuidStr    string
+	uuid       [16]byte
 	useTLS     bool
 	useECH     bool
 }
 
-func NewGRPCTransport(serverAddr, serverIP, uuid string, useTLS, useECH bool) *GRPCTransport {
+func NewGRPCTransport(serverAddr, serverIP, uuidStr string, useTLS, useECH bool) *GRPCTransport {
+	uuid, err := parseUUID(uuidStr)
+	if err != nil {
+		log.Printf("[警告] 无法解析 UUID: %v", err)
+	}
+
 	return &GRPCTransport{
 		serverAddr: serverAddr,
 		serverIP:   serverIP,
+		uuidStr:    uuidStr,
 		uuid:       uuid,
 		useTLS:     useTLS,
 		useECH:     useECH,
@@ -576,11 +660,7 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 
 	client := pb.NewProxyServiceClient(conn)
 
-	// 创建带 metadata 的 context（用于鉴权）
-	md := metadata.New(map[string]string{"uuid": t.uuid})
-	streamCtx := metadata.NewOutgoingContext(context.Background(), md)
-
-	stream, err := client.Tunnel(streamCtx)
+	stream, err := client.Tunnel(context.Background())
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("gRPC stream failed: %w", err)
@@ -589,6 +669,7 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 	return &GRPCConn{
 		conn:   conn,
 		stream: stream,
+		uuid:   t.uuid,
 	}, nil
 }
 
@@ -596,35 +677,54 @@ func (t *GRPCTransport) Dial() (TunnelConn, error) {
 type GRPCConn struct {
 	conn   *grpc.ClientConn
 	stream pb.ProxyService_TunnelClient
+	uuid   [16]byte
 	mu     sync.Mutex
 }
 
 func (c *GRPCConn) Connect(target string, initialData []byte) error {
-	// 构建 CONNECT 消息（与 WebSocket 协议兼容）
-	connectMsg := fmt.Sprintf("CONNECT:%s|", target)
-	data := append([]byte(connectMsg), initialData...)
+	addr, err := ewp.ParseAddress(target)
+	if err != nil {
+		return fmt.Errorf("parse address: %w", err)
+	}
+
+	req := ewp.NewHandshakeRequest(c.uuid, ewp.CommandTCP, addr)
+
+	handshakeData, err := req.Encode()
+	if err != nil {
+		return fmt.Errorf("encode handshake: %w", err)
+	}
 
 	c.mu.Lock()
-	err := c.stream.Send(&pb.SocketData{Content: data})
+	err = c.stream.Send(&pb.SocketData{Content: handshakeData})
 	c.mu.Unlock()
 	if err != nil {
-		return err
+		return fmt.Errorf("send handshake: %w", err)
 	}
 
-	// 等待响应
-	resp, err := c.stream.Recv()
+	respMsg, err := c.stream.Recv()
 	if err != nil {
-		return err
+		return fmt.Errorf("read handshake response: %w", err)
 	}
 
-	response := string(resp.Content)
-	if strings.HasPrefix(response, "ERROR:") {
-		return errors.New(response)
-	}
-	if response != "CONNECTED" {
-		return fmt.Errorf("unexpected response: %s", response)
+	resp, err := ewp.DecodeHandshakeResponse(respMsg.Content, req.Version, req.Nonce, c.uuid)
+	if err != nil {
+		return fmt.Errorf("decode handshake response: %w", err)
 	}
 
+	if resp.Status != ewp.StatusOK {
+		return fmt.Errorf("handshake failed with status: %d", resp.Status)
+	}
+
+	if len(initialData) > 0 {
+		c.mu.Lock()
+		err = c.stream.Send(&pb.SocketData{Content: initialData})
+		c.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("send initial data: %w", err)
+		}
+	}
+
+	logV("[EWP] gRPC 握手成功，目标: %s", target)
 	return nil
 }
 
