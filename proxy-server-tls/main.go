@@ -507,6 +507,7 @@ type xhttpSession struct {
 	uploadQueue      *uploadQueue
 	done             chan struct{}
 	isFullyConnected chan struct{}
+	closeOnce        sync.Once
 }
 
 var (
@@ -878,7 +879,9 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 	}
 	
 	session := val.(*xhttpSession)
-	close(session.isFullyConnected)
+	session.closeOnce.Do(func() {
+		close(session.isFullyConnected)
+	})
 	defer xhttpSessions.Delete(sessionID)
 
 	if session.remote == nil {
