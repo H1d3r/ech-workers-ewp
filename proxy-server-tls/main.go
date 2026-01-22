@@ -524,11 +524,18 @@ func startXHTTPServer() {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"}, // 显式支持 HTTP/2
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
+	
+	// 包装所有请求的日志中间件
+	loggedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[DEBUG] HTTP request received: %s %s %s from %s", r.Proto, r.Method, r.URL.Path, r.RemoteAddr)
+		mux.ServeHTTP(w, r)
+	})
 	
 	mux.HandleFunc(xhttpPath+"/", xhttpHandler)
 	mux.HandleFunc(xhttpPath, xhttpHandler)
@@ -536,7 +543,7 @@ func startXHTTPServer() {
 
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           mux,
+		Handler:           loggedHandler,
 		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -811,47 +818,95 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("✅ stream-one closed: %s", target)
 }
 
-func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+// xhttpHandshakeHandler 处理 stream-down 模式的 EWP 握手请求 (seq=0)
+func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+	clientIP := r.RemoteAddr
+	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
+		clientIP = clientIP[:idx]
+	}
+
+	// 读取 EWP 握手请求
+	handshakeData, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("❌ XHTTP handshake: Failed to read body: %v", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[DEBUG] XHTTP handshake: sessionID=%s, dataLen=%d", sessionID, len(handshakeData))
+
+	// 处理 EWP 握手
+	req, respData, err := handleEWPHandshakeBinary(handshakeData, clientIP)
+	if err != nil {
+		log.Printf("❌ XHTTP handshake: EWP failed: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(respData)
+		return
+	}
+
+	// 连接目标服务器
+	target := req.Address.String()
+	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		log.Printf("❌ XHTTP handshake: Dial failed: %v", err)
+		http.Error(w, "Connection failed", http.StatusBadGateway)
+		return
+	}
+
+	// 创建 session 并存储远程连接
 	session := upsertSession(sessionID)
+	session.remote = remote
+
+	log.Printf("✅ XHTTP handshake success: sessionID=%s, target=%s", sessionID, target)
+
+	// 返回 EWP 握手响应
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respData)
+}
+
+func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+	val, ok := xhttpSessions.Load(sessionID)
+	if !ok {
+		// 等待 session 创建（握手可能还在处理中）
+		time.Sleep(100 * time.Millisecond)
+		val, ok = xhttpSessions.Load(sessionID)
+		if !ok {
+			http.Error(w, "Session not found", http.StatusNotFound)
+			return
+		}
+	}
+	
+	session := val.(*xhttpSession)
 	close(session.isFullyConnected)
 	defer xhttpSessions.Delete(sessionID)
 
 	if session.remote == nil {
-		target := r.Header.Get("X-Target")
-		if target == "" {
-			http.Error(w, "Missing target", http.StatusBadRequest)
-			return
-		}
+		http.Error(w, "Session not ready", http.StatusServiceUnavailable)
+		return
+	}
 
-		remote, err := net.Dial("tcp", target)
-		if err != nil {
-			log.Printf("❌ Dial failed: %v", err)
-			http.Error(w, "Connection failed", http.StatusBadGateway)
-			return
-		}
-		session.remote = remote
-
-		go func() {
-			buf := largeBufferPool.Get().([]byte)
-			defer largeBufferPool.Put(buf)
-			for {
-				select {
-				case <-session.done:
-					return
-				default:
-					n, err := session.uploadQueue.Read(buf)
-					if n > 0 {
-						if _, e := remote.Write(buf[:n]); e != nil {
-							return
-						}
-					}
-					if err != nil {
+	// 启动上行数据处理（从 uploadQueue 写入 remote）
+	go func() {
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+		for {
+			select {
+			case <-session.done:
+				return
+			default:
+				n, err := session.uploadQueue.Read(buf)
+				if n > 0 {
+					if _, e := session.remote.Write(buf[:n]); e != nil {
 						return
 					}
 				}
+				if err != nil {
+					return
+				}
 			}
-		}()
-	}
+		}
+	}()
 
 	log.Printf("📥 stream-down GET: %s", sessionID)
 
@@ -886,6 +941,13 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 }
 
 func xhttpUploadHandler(w http.ResponseWriter, r *http.Request, sessionID, seqStr string) {
+	// 检查是否是 seq=0 的握手请求
+	if seqStr == "0" {
+		// seq=0 是 EWP 握手请求，需要创建 session
+		xhttpHandshakeHandler(w, r, sessionID)
+		return
+	}
+
 	val, ok := xhttpSessions.Load(sessionID)
 	if !ok {
 		http.Error(w, "Session not found", http.StatusNotFound)
