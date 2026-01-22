@@ -203,7 +203,16 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 		return err
 	}
 
-	req, respData, err := handleEWPHandshakeBinary(firstMsg.GetContent(), clientIP)
+	content := firstMsg.GetContent()
+	// 调试：打印收到的原始数据摘要
+	if len(content) >= 32 {
+		fmt.Printf("[DEBUG] gRPC received: len=%d, first16=%x, last16=%x\n", 
+			len(content), content[:16], content[len(content)-16:])
+	} else {
+		fmt.Printf("[DEBUG] gRPC received: len=%d, data=%x\n", len(content), content)
+	}
+
+	req, respData, err := handleEWPHandshakeBinary(content, clientIP)
 	if err != nil {
 		stream.Send(&pb.SocketData{Content: respData})
 		return nil
