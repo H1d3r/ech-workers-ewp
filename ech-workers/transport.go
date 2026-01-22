@@ -890,6 +890,12 @@ func (c *GRPCConn) Connect(target string, initialData []byte) error {
 		return fmt.Errorf("encode handshake: %w", err)
 	}
 
+	// 调试：打印发送的原始数据摘要
+	if len(handshakeData) >= 32 {
+		fmt.Printf("[DEBUG] gRPC sending: len=%d, first16=%x, last16=%x\n", 
+			len(handshakeData), handshakeData[:16], handshakeData[len(handshakeData)-16:])
+	}
+
 	c.mu.Lock()
 	err = c.stream.Send(&pb.SocketData{Content: handshakeData})
 	c.mu.Unlock()
