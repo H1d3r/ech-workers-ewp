@@ -17,6 +17,7 @@ import (
 	"time"
 
 	pb "proxy-server/proto"
+	"proxy-server/ewp"
 
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
