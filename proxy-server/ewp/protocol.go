@@ -164,13 +164,15 @@ func DecodeHandshakeRequest(data []byte, validUUIDs [][16]byte) (*HandshakeReque
 		return nil, ErrInvalidLength
 	}
 
-	if len(data) < 15+int(payloadLen)+16 {
+	// ciphertextLen = plaintextLen + 16 (Poly1305 tag)
+	ciphertextLen := int(payloadLen) + 16
+	if len(data) < 15+ciphertextLen+16 {
 		return nil, ErrInvalidLength
 	}
 
 	ad := data[0:15]
-	ciphertext := data[15 : 15+payloadLen]
-	authTag := data[15+payloadLen : 15+payloadLen+16]
+	ciphertext := data[15 : 15+ciphertextLen]
+	authTag := data[15+ciphertextLen : 15+ciphertextLen+16]
 
 	for _, uuid := range validUUIDs {
 		expectedTag := computeHMAC(uuid, ad, ciphertext)

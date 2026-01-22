@@ -549,7 +549,12 @@ func startXHTTPServer() {
 }
 
 func xhttpHandler(w http.ResponseWriter, r *http.Request) {
+	// 调试：打印所有进入的请求
+	log.Printf("[DEBUG] XHTTP request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	log.Printf("[DEBUG] X-Auth-Token: %s (expected: %s)", r.Header.Get("X-Auth-Token"), uuid)
+	
 	if r.Header.Get("X-Auth-Token") != uuid {
+		log.Printf("[DEBUG] Token mismatch, returning disguise page")
 		disguiseHandler(w, r)
 		return
 	}
