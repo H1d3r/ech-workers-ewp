@@ -5,7 +5,8 @@
 ## 特性
 
 - ✅ **ECH 支持**：Go 1.24 原生 TLS 1.3 ECH，隐藏真实 SNI
-- ✅ **双协议**：WebSocket + Yamux / gRPC 双向流
+- ✅ **Vision 流控**：基于 Xray-core Vision 协议，流量混淆 + 零拷贝优化（默认启用）
+- ✅ **多协议**：WebSocket + Vision / gRPC 双向流 / Yamux 多路复用（已弃用）
 - ✅ **多模式代理**：SOCKS5 / HTTP CONNECT / TUN
 - ✅ **Web UI**：内置图形界面，单文件分发
 - ✅ **系统代理**：自动配置 Windows 系统代理
@@ -51,6 +52,8 @@
 | `-ip` | Server IP | 优选 IP 或 CNAME 域名（见下方说明） | - |
 | `-token` | Token / UUID | 认证令牌，需与服务端一致 | - |
 | `-mode` | Transport Mode | 传输模式：`ws`(WebSocket) / `grpc` | `ws` |
+| `-flow` | Vision Flow | 启用 Vision 流控协议 | `true` |
+| `-yamux` | Yamux Mode | 启用 Yamux 多路复用（已弃用） | `false` |
 | `-fallback` | Fallback Mode | 禁用 ECH，使用普通 TLS 1.3 | `false` |
 | `-ech` | ECH Domain | ECH 配置查询域名 | `cloudflare-ech.com` |
 | `-dns` | DoH Server | DNS-over-HTTPS 服务器地址 | `dns.alidns.com/dns-query` |
@@ -115,8 +118,18 @@ ECH 是 TLS 1.3 的扩展，用于加密 SNI（Server Name Indication）：
 
 | 模式 | 说明 | 适用场景 |
 |------|------|----------|
-| `ws` | WebSocket + Yamux 多路复用 | **推荐**，兼容性好，支持 Cloudflare Workers |
-| `grpc` | gRPC 双向流 | 需要服务端开启 gRPC 模式 |
+| `ws` | WebSocket + Vision 流控 | **推荐**，默认启用 Vision 流控，兼容 Cloudflare Workers |
+| `grpc` | gRPC 双向流 + Vision 流控 | 需要服务端开启 gRPC 模式 |
+
+**Vision 流控说明**：
+- 默认启用（`-flow=true`），提供流量混淆和零拷贝优化
+- 自动检测 TLS 1.3 并启用 XTLS 直接转发
+- 兼容所有 WebSocket 和 gRPC 服务端
+- 使用 `-flow=false` 可禁用（不推荐）
+
+**Yamux 多路复用**：
+- 已弃用，使用 `-yamux` 启用
+- 不推荐使用，Vision 提供更好的性能
 
 ## 编译
 
@@ -186,26 +199,35 @@ GOOS=darwin GOARCH=amd64 go build -o ech-workers .
 3. 在 TLS 握手时使用 ECH 加密 SNI
 4. 中间人只能看到加密后的 SNI，无法识别真实目标
 
-### Yamux 多路复用
+### Vision 流控协议
 
-1. 单个 WebSocket 连接上建立 Yamux 会话
-2. 每个代理请求使用独立的 Yamux Stream
-3. 减少握手开销，提高并发性能
-4. 内置 KeepAlive 保持连接活跃
+1. 基于 Xray-core Vision 实现，动态填充消除流量特征
+2. 自动检测 TLS 1.3 流量并启用零拷贝优化（XTLS）
+3. 兼容 Cloudflare Workers（无需多路复用）
+4. 填充参数可配置：`[900, 500, 900, 256]`
+
+### Yamux 多路复用（已弃用）
+
+1. 使用 `-yamux` 参数可启用旧版 Yamux 协议
+2. 单个 WebSocket 连接上建立 Yamux 会话
+3. 每个代理请求使用独立的 Yamux Stream
+4. **不推荐使用**，Vision 流控提供更好的性能和混淆效果
 
 ## 性能优化
 
 本项目已针对高并发场景进行深度优化，显著提升吞吐量并降低内存占用。
 
-### Yamux 配置调优
+### Vision 流控优化
 
-**窗口大小优化**：
-- `MaxStreamWindowSize`: 4MB (默认 256KB)
-- `StreamOpenTimeout`: 15s
-- `StreamCloseTimeout`: 5s
+**动态填充算法**：
+- 长填充：`rand(500) + 900 - contentLen`（TLS 握手阶段）
+- 短填充：`rand(256)`（常规流量）
+- 自动检测 TLS Application Data 并切换到零拷贝模式
 
 **性能提升**：
-- 吞吐量提升 **40-50%**（减少 WINDOW_UPDATE 帧频率）
+- 流量混淆：消除长度签名，防止流量分析
+- 零拷贝：检测到 TLS 1.3 后自动启用 XTLS 直接转发
+- 内存优化：无需多路复用开销，降低 GC 压力
 
 ### 内存池化
 
