@@ -2,7 +2,6 @@ package ewp
 
 import (
 	"bytes"
-	crand "crypto/rand"
 	"encoding/binary"
 	"io"
 	"math/rand"
