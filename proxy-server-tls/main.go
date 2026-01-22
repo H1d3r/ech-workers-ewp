@@ -34,17 +34,20 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
 var (
 	uuid          = getEnv("UUID", "d342d11e-d424-4583-b36e-524ab1f0afa4")
 	port          = getEnv("PORT", "8080")
+	wsPath        = getEnv("WS_PATH", "/")
 	xhttpPath     = getEnv("XHTTP_PATH", "/xhttp")
 	paddingMin    = getEnvInt("PADDING_MIN", 100)
 	paddingMax    = getEnvInt("PADDING_MAX", 1000)
 	grpcMode      = false
 	xhttpMode     = false
+	enableFlow    = false
 	upgrader      = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 )
 
@@ -132,18 +135,25 @@ func main() {
 	// 解析命令行参数
 	flag.BoolVar(&grpcMode, "grpc", false, "启用 gRPC 模式")
 	flag.BoolVar(&xhttpMode, "xhttp", false, "启用 XHTTP 模式")
+	flag.BoolVar(&enableFlow, "flow", false, "启用 EWP Flow 流控协议（Vision 风格）")
 	flag.StringVar(&port, "port", port, "监听端口")
 	flag.Parse()
 
-	// 也支持环境变量 MODE=grpc/xhttp
+	// 也支持环境变量 MODE=grpc/xhttp, ENABLE_FLOW=true/false
 	mode := os.Getenv("MODE")
 	if mode == "grpc" {
 		grpcMode = true
 	} else if mode == "xhttp" {
 		xhttpMode = true
 	}
+	if os.Getenv("ENABLE_FLOW") == "true" {
+		enableFlow = true
+	}
 
 	log.Printf("🔑 UUID: %s", uuid)
+	if enableFlow {
+		log.Printf("🌊 EWP Flow 协议已启用（Vision 风格流控）")
+	}
 
 	if err := initEWPHandler(uuid); err != nil {
 		log.Fatalf("❌ Failed to initialize EWP handler: %v", err)
@@ -162,14 +172,15 @@ func main() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/health", healthHandler)
 		mux.HandleFunc("/healthz", healthHandler)
-		mux.HandleFunc("/", handler)
+		mux.HandleFunc(wsPath, wsHandler)
+		mux.HandleFunc("/", disguiseHandler)
 
 		server := &http.Server{
 			Addr:    ":" + port,
 			Handler: mux,
 		}
 
-		log.Printf("🚀 WebSocket server listening on :%s", port)
+		log.Printf("🚀 WebSocket server listening on :%s (ws_path=%s)", port, wsPath)
 		log.Fatal(server.ListenAndServe())
 	}
 }
@@ -181,7 +192,13 @@ type proxyServer struct {
 }
 
 func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
-	log.Println("🔗 gRPC client connected")
+	// 提取客户端 IP
+	clientIP := "unknown"
+	if p, ok := peer.FromContext(stream.Context()); ok {
+		clientIP = p.Addr.String()
+	}
+	
+	log.Printf("🔗 gRPC client connected from %s", clientIP)
 
 	firstMsg, err := stream.Recv()
 	if err != nil {
@@ -189,7 +206,7 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 		return err
 	}
 
-	req, respData, err := handleEWPHandshakeBinary(firstMsg.GetContent())
+	req, respData, err := handleEWPHandshakeBinary(firstMsg.GetContent(), clientIP)
 	if err != nil {
 		stream.Send(&pb.SocketData{Content: respData})
 		return nil
@@ -212,6 +229,16 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 
 	log.Printf("✅ gRPC connected to %s", target)
 
+	// 初始化 Flow State（如果启用）
+	var flowState *ewp.FlowState
+	var writeOnceUserUUID []byte
+	if enableFlow {
+		flowState = ewp.NewFlowState(req.UUID[:])
+		writeOnceUserUUID = make([]byte, 16)
+		copy(writeOnceUserUUID, req.UUID[:])
+		log.Printf("🌊 gRPC Flow 协议已启用")
+	}
+
 	// 双向转发
 	done := make(chan struct{}, 2)
 
@@ -223,7 +250,15 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 			if err != nil {
 				return
 			}
-			if _, err := remote.Write(msg.GetContent()); err != nil {
+
+			data := msg.GetContent()
+
+			// 处理 Flow 协议（移除填充）
+			if enableFlow && flowState != nil {
+				data = flowState.ProcessUplink(data)
+			}
+
+			if _, err := remote.Write(data); err != nil {
 				return
 			}
 		}
@@ -240,7 +275,18 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 			if err != nil {
 				return
 			}
-			if err := stream.Send(&pb.SocketData{Content: buf[:n:n]}); err != nil {
+
+			data := buf[:n]
+
+			// 应用 Flow 协议（添加填充）
+			if enableFlow && flowState != nil {
+				data = flowState.PadDownlink(data, &writeOnceUserUUID)
+			}
+
+			// 复制数据发送
+			sendData := make([]byte, len(data))
+			copy(sendData, data)
+			if err := stream.Send(&pb.SocketData{Content: sendData}); err != nil {
 				return
 			}
 		}
@@ -308,22 +354,23 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("📥 Request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
-
-	// Check auth via header or path
-	proto := r.Header.Get("Sec-WebSocket-Protocol")
-	authorized := proto == uuid || strings.Contains(r.URL.Path, uuid)
-
-	if !authorized || !websocket.IsWebSocketUpgrade(r) {
-		w.Header().Set("Server", "nginx/1.18.0")
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(nginxHTML))
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != wsPath {
+		disguiseHandler(w, r)
 		return
 	}
 
-	// Upgrade to WebSocket
+	proto := r.Header.Get("Sec-WebSocket-Protocol")
+	if proto != uuid {
+		disguiseHandler(w, r)
+		return
+	}
+
+	if !websocket.IsWebSocketUpgrade(r) {
+		disguiseHandler(w, r)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, http.Header{"Sec-WebSocket-Protocol": {proto}})
 	if err != nil {
 		log.Printf("❌ Upgrade error: %v", err)
@@ -331,8 +378,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	log.Println("✅ Client connected")
-	handleWebSocket(conn)
+	log.Printf("✅ WebSocket connected: %s %s", r.Method, r.URL.Path)
+	handleWebSocket(conn, r.RemoteAddr)
 }
 
 // WebSocket adapter for yamux
@@ -365,7 +412,7 @@ func (c *wsConn) Write(p []byte) (int, error) {
 }
 
 // handleWebSocket 自动检测客户端协议：Yamux 或 EWP 协议
-func handleWebSocket(conn *websocket.Conn) {
+func handleWebSocket(conn *websocket.Conn, clientAddr string) {
 	// 读取第一帧数据来判断协议类型
 	_, firstMsg, err := conn.ReadMessage()
 	if err != nil {
@@ -378,11 +425,11 @@ func handleWebSocket(conn *websocket.Conn) {
 	if len(firstMsg) >= 2 && firstMsg[0] == 0x00 {
 		// Yamux 协议
 		log.Println("🔄 Detected Yamux protocol")
-		handleYamuxWithFirstFrame(conn, firstMsg)
+		handleYamuxWithFirstFrame(conn, firstMsg, clientAddr)
 	} else if len(firstMsg) >= 15 && firstMsg[0] >= 0x01 && firstMsg[0] <= 0xFF {
 		// EWP 协议
 		log.Println("🔄 Detected EWP protocol")
-		handleSimpleProtocol(conn, firstMsg)
+		handleSimpleProtocol(conn, firstMsg, clientAddr)
 	} else {
 		log.Printf("❌ Unknown protocol, first bytes: %v", firstMsg[:min(len(firstMsg), 16)])
 		return
@@ -390,8 +437,8 @@ func handleWebSocket(conn *websocket.Conn) {
 }
 
 // handleSimpleProtocol 处理 EWP 协议（简单 WebSocket 模式）
-func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
-	req, respData, err := handleEWPHandshakeBinary(firstMsg)
+func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte, clientAddr string) {
+	req, respData, err := handleEWPHandshakeBinary(firstMsg, clientAddr)
 	if err != nil {
 		conn.WriteMessage(websocket.BinaryMessage, respData)
 		return
@@ -414,6 +461,16 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 
 	log.Printf("✅ Simple WebSocket connected to %s", target)
 
+	// 初始化 Flow State（如果启用）
+	var flowState *ewp.FlowState
+	var writeOnceUserUUID []byte
+	if enableFlow {
+		flowState = ewp.NewFlowState(req.UUID[:])
+		writeOnceUserUUID = make([]byte, 16)
+		copy(writeOnceUserUUID, req.UUID[:])
+		log.Printf("🌊 Flow 协议已启用")
+	}
+
 	// 双向转发
 	done := make(chan struct{}, 2)
 
@@ -429,6 +486,12 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 			if str := string(msg); str == "CLOSE" {
 				return
 			}
+
+			// 处理 Flow 协议（移除填充）
+			if enableFlow && flowState != nil {
+				msg = flowState.ProcessUplink(msg)
+			}
+
 			if _, err := remote.Write(msg); err != nil {
 				return
 			}
@@ -446,9 +509,18 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 			if err != nil {
 				return
 			}
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+
+			data := buf[:n]
+
+			// 应用 Flow 协议（添加填充）
+			if enableFlow && flowState != nil {
+				data = flowState.PadDownlink(data, &writeOnceUserUUID)
+			}
+
+			// 复制数据发送
+			sendData := make([]byte, len(data))
+			copy(sendData, data)
+			if err := conn.WriteMessage(websocket.BinaryMessage, sendData); err != nil {
 				return
 			}
 		}
@@ -460,7 +532,7 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 }
 
 // handleYamuxWithFirstFrame 处理 Yamux 协议（带已读取的第一帧）
-func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte) {
+func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte, clientAddr string) {
 	ws := &wsConnWithBuffer{
 		Conn:        conn,
 		firstFrame:  firstFrame,
@@ -491,7 +563,7 @@ func handleYamuxWithFirstFrame(conn *websocket.Conn, firstFrame []byte) {
 			}
 			return
 		}
-		go handleStream(stream)
+		go handleStream(stream, clientAddr)
 	}
 }
 
@@ -563,10 +635,10 @@ func handleYamux(conn *websocket.Conn) {
 	}
 }
 
-func handleStream(stream net.Conn) {
+func handleStream(stream net.Conn, clientAddr string) {
 	defer stream.Close()
 
-	req, respData, err := handleEWPHandshake(stream)
+	req, respData, err := handleEWPHandshake(stream, clientAddr)
 	if err != nil {
 		stream.Write(respData)
 		return

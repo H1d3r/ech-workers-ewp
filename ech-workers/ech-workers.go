@@ -53,8 +53,8 @@ var (
 	echDomain  string
 	fallback   bool
 	numConns   int
-	protoMode  string // 传输协议模式: ws 或 grpc
-	useYamux   bool   // 是否启用 Yamux 多路复用（仅 WebSocket 模式）
+	protoMode  string // 传输协议模式: ws/grpc/xhttp
+	enableFlow bool   // 启用 Vision 流控协议
 	controlAddr string
 	logFilePath string
 	verbose     bool   // 详细日志模式
@@ -110,15 +110,15 @@ var (
 
 func init() {
 	flag.StringVar(&listenAddr, "l", "127.0.0.1:30000", "代理监听地址 (支持 SOCKS5 和 HTTP)")
-	flag.StringVar(&serverAddr, "f", "", "服务端地址 (格式: x.x.workers.dev:443 或 grpc://host:port)")
-	flag.StringVar(&serverIP, "ip", "", "指定服务端 IP（绕过 DNS 解析）")
+	flag.StringVar(&serverAddr, "f", "", "服务端地址 (支持: wss://host:port/path, grpcs://host:port, https://host:port/xhttp)")
+	flag.StringVar(&serverIP, "ip", "", "指定服务端 IP（绕过 DNS，TLS SNI 仍使用原 host）")
 	flag.StringVar(&token, "token", "", "身份验证令牌 (WebSocket) 或 UUID (gRPC)")
 	flag.StringVar(&dnsServer, "dns", "dns.alidns.com/dns-query", "ECH 查询 DoH 服务器")
 	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "ECH 查询域名")
 	flag.BoolVar(&fallback, "fallback", false, "禁用 ECH (普通 TLS 模式)")
 	flag.IntVar(&numConns, "n", 1, "并发连接数 (默认 1)")
-	flag.StringVar(&protoMode, "mode", "ws", "传输协议模式: ws (WebSocket) 或 grpc")
-	flag.BoolVar(&useYamux, "yamux", true, "启用 Yamux 多路复用（仅 WebSocket 模式，默认启用；关闭后兼容 Cloudflare Workers）")
+	flag.StringVar(&protoMode, "mode", "ws", "传输协议模式: ws (WebSocket)、grpc 或 xhttp")
+	flag.BoolVar(&enableFlow, "flow", true, "启用 Vision 流控协议（默认启用，提供流量混淆和零拷贝优化）")
 	flag.StringVar(&controlAddr, "control", "", "本地控制接口监听地址（仅用于 GUI 控制退出），例如 127.0.0.1:0")
 	flag.StringVar(&logFilePath, "logfile", "", "将日志追加写入到文件（用于 GUI 提权启动时仍能显示日志）")
 	flag.BoolVar(&verbose, "verbose", false, "详细日志模式（记录每个连接详情，高并发时会产生大量日志）")
@@ -216,7 +216,7 @@ func main() {
 	}
 
 	// 初始化传输层
-	InitTransport(protoMode, serverAddr, serverIP, token, useECH, useYamux)
+	InitTransport(protoMode, serverAddr, serverIP, token, useECH, enableFlow)
 	log.Printf("[启动] 传输层: %s", GetTransport().Name())
 
 	if tunMode {
@@ -568,21 +568,7 @@ func queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 
 // ======================== WebSocket 客户端 ========================
 
-func parseServerAddr(addr string) (host, port, path string, err error) {
-	path = "/"
-	slashIdx := strings.Index(addr, "/")
-	if slashIdx != -1 {
-		path = addr[slashIdx:]
-		addr = addr[:slashIdx]
-	}
 
-	host, port, err = net.SplitHostPort(addr)
-	if err != nil {
-		return "", "", "", fmt.Errorf("无效的服务器地址格式: %v", err)
-	}
-
-	return host, port, path, nil
-}
 
 // ======================== 统一代理服务器 ========================
 
@@ -1106,20 +1092,23 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		}
 	}()
 
-	// Server -> Client (下载)
+	// Server -> Client (下载) - 零拷贝优化
 	go func() {
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+		
 		for {
-			data, err := tunnelConn.Read()
+			n, err := tunnelConn.Read(buf)
 			if err != nil {
 				done <- true
 				return
 			}
 
-			if _, err := conn.Write(data); err != nil {
+			if _, err := conn.Write(buf[:n]); err != nil {
 				done <- true
 				return
 			}
-			atomic.AddInt64(&totalDownload, int64(len(data)))
+			atomic.AddInt64(&totalDownload, int64(n))
 		}
 	}()
 

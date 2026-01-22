@@ -26,6 +26,7 @@ import (
 var (
 	uuid          = getEnv("UUID", "d342d11e-d424-4583-b36e-524ab1f0afa4")
 	port          = getEnv("PORT", "8080")
+	wsPath        = getEnv("WS_PATH", "/")
 	xhttpPath     = getEnv("XHTTP_PATH", "/xhttp")
 	paddingMin    = getEnvInt("PADDING_MIN", 100)
 	paddingMax    = getEnvInt("PADDING_MAX", 1000)
@@ -103,14 +104,15 @@ func main() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/health", healthHandler)
 		mux.HandleFunc("/healthz", healthHandler)
-		mux.HandleFunc("/", handler)
+		mux.HandleFunc(wsPath, wsHandler)
+		mux.HandleFunc("/", disguiseHandler)
 
 		server := &http.Server{
 			Addr:    ":" + port,
 			Handler: mux,
 		}
 
-		log.Printf("🚀 WebSocket server listening on :%s", port)
+		log.Printf("🚀 WebSocket server listening on :%s (ws_path=%s)", port, wsPath)
 		log.Fatal(server.ListenAndServe())
 	}
 }
@@ -590,22 +592,23 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("📥 Request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
-
-	// Check auth via header or path
-	proto := r.Header.Get("Sec-WebSocket-Protocol")
-	authorized := proto == uuid || strings.Contains(r.URL.Path, uuid)
-
-	if !authorized || !websocket.IsWebSocketUpgrade(r) {
-		w.Header().Set("Server", "nginx/1.18.0")
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(nginxHTML))
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != wsPath {
+		disguiseHandler(w, r)
 		return
 	}
 
-	// Upgrade to WebSocket
+	proto := r.Header.Get("Sec-WebSocket-Protocol")
+	if proto != uuid {
+		disguiseHandler(w, r)
+		return
+	}
+
+	if !websocket.IsWebSocketUpgrade(r) {
+		disguiseHandler(w, r)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, http.Header{"Sec-WebSocket-Protocol": {proto}})
 	if err != nil {
 		log.Printf("❌ Upgrade error: %v", err)
@@ -613,7 +616,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	log.Println("✅ Client connected")
+	log.Printf("✅ WebSocket connected: %s %s", r.Method, r.URL.Path)
 	handleWebSocket(conn)
 }
 
@@ -670,7 +673,7 @@ func handleWebSocket(conn *websocket.Conn) {
 	}
 }
 
-// handleSimpleProtocol 处理 EWP 协议（简单 WebSocket 模式）
+// handleSimpleProtocol 处理 EWP 协议（支持 Vision 流控自动检测）
 func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 	req, respData, err := handleEWPHandshakeBinary(firstMsg)
 	if err != nil {
@@ -684,7 +687,7 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 	}
 
 	target := req.TargetAddr.String()
-	log.Printf("🔗 Simple WebSocket connecting to %s", target)
+	log.Printf("🔗 WebSocket connecting to %s", target)
 
 	remote, err := net.Dial("tcp", target)
 	if err != nil {
@@ -693,12 +696,17 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 	}
 	defer remote.Close()
 
-	log.Printf("✅ Simple WebSocket connected to %s", target)
+	log.Printf("✅ WebSocket connected to %s", target)
 
+	// 初始化 Vision 流控状态
+	flowState := ewp.NewFlowState(req.UUID[:])
+	writeOnceUserUUID := make([]byte, 16)
+	copy(writeOnceUserUUID, req.UUID[:])
+	
 	// 双向转发
 	done := make(chan struct{}, 2)
 
-	// WebSocket -> remote
+	// WebSocket -> remote (uplink: 解包 Vision 填充)
 	go func() {
 		defer func() { done <- struct{}{} }()
 		for {
@@ -710,13 +718,19 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 			if str := string(msg); str == "CLOSE" {
 				return
 			}
-			if _, err := remote.Write(msg); err != nil {
-				return
+			
+			// 处理 Vision 流控（自动检测并解包）
+			processedData := flowState.ProcessUplink(msg)
+			
+			if len(processedData) > 0 {
+				if _, err := remote.Write(processedData); err != nil {
+					return
+				}
 			}
 		}
 	}()
 
-	// remote -> WebSocket
+	// remote -> WebSocket (downlink: 添加 Vision 填充)
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buf := largeBufferPool.Get().([]byte)
@@ -727,9 +741,21 @@ func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
 			if err != nil {
 				return
 			}
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+			
+			// 过滤 TLS 流量
+			if flowState.NumberOfPacketToFilter > 0 {
+				flowState.XtlsFilterTls(buf[:n])
+			}
+			
+			// 应用 Vision 填充（如果需要）
+			var writeData []byte
+			if flowState.ShouldPad(false) {
+				writeData = flowState.PadDownlink(buf[:n], &writeOnceUserUUID)
+			} else {
+				writeData = buf[:n]
+			}
+			
+			if err := conn.WriteMessage(websocket.BinaryMessage, writeData); err != nil {
 				return
 			}
 		}
