@@ -845,17 +845,20 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 		return
 	}
 
+	// 先创建 session（让 GET 请求可以找到它）
+	session := upsertSession(sessionID)
+
 	// 连接目标服务器
 	target := req.TargetAddr.String()
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.Printf("❌ XHTTP handshake: Dial failed: %v", err)
+		xhttpSessions.Delete(sessionID) // 清理失败的 session
 		http.Error(w, "Connection failed", http.StatusBadGateway)
 		return
 	}
 
-	// 创建 session 并存储远程连接
-	session := upsertSession(sessionID)
+	// 设置远程连接
 	session.remote = remote
 
 	log.Printf("✅ XHTTP handshake success: sessionID=%s, target=%s", sessionID, target)
@@ -867,27 +870,33 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 }
 
 func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
-	val, ok := xhttpSessions.Load(sessionID)
-	if !ok {
-		// 等待 session 创建（握手可能还在处理中）
-		time.Sleep(100 * time.Millisecond)
-		val, ok = xhttpSessions.Load(sessionID)
-		if !ok {
-			http.Error(w, "Session not found", http.StatusNotFound)
-			return
+	// 等待 session 创建和 remote 就绪（最多等 15 秒）
+	var session *xhttpSession
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		val, ok := xhttpSessions.Load(sessionID)
+		if ok {
+			session = val.(*xhttpSession)
+			if session.remote != nil {
+				break
+			}
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	
-	session := val.(*xhttpSession)
+
+	if session == nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	if session.remote == nil {
+		http.Error(w, "Session not ready (target connection timeout)", http.StatusGatewayTimeout)
+		return
+	}
+
 	session.closeOnce.Do(func() {
 		close(session.isFullyConnected)
 	})
 	defer xhttpSessions.Delete(sessionID)
-
-	if session.remote == nil {
-		http.Error(w, "Session not ready", http.StatusServiceUnavailable)
-		return
-	}
 
 	// 启动上行数据处理（从 uploadQueue 写入 remote）
 	go func() {
