@@ -848,12 +848,20 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 	// 先创建 session（让 GET 请求可以找到它）
 	session := upsertSession(sessionID)
 
-	// 连接目标服务器
+	// 连接目标服务器（使用请求 context，支持取消）
 	target := req.TargetAddr.String()
-	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	
+	var d net.Dialer
+	remote, err := d.DialContext(ctx, "tcp", target)
 	if err != nil {
 		log.Printf("❌ XHTTP handshake: Dial failed: %v", err)
 		xhttpSessions.Delete(sessionID) // 清理失败的 session
+		if ctx.Err() == context.Canceled {
+			// 客户端已取消，不需要返回错误
+			return
+		}
 		http.Error(w, "Connection failed", http.StatusBadGateway)
 		return
 	}
