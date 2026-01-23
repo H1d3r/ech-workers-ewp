@@ -1356,6 +1356,14 @@ func tunReadLoop() {
 	for {
 		packet, err := tunSession.ReceivePacket()
 		if err != nil {
+			// "No more data is available" 是 Wintun 无数据时的正常返回，静默处理
+			errStr := err.Error()
+			if err == windows.ERROR_NO_MORE_ITEMS || 
+			   strings.Contains(errStr, "No more data is available") ||
+			   strings.Contains(errStr, "ERROR_NO_MORE_ITEMS") {
+				time.Sleep(1 * time.Millisecond)
+				continue
+			}
 			log.Printf("[TUN] 读取数据包失败: %v", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
