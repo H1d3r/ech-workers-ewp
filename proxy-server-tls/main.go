@@ -41,7 +41,7 @@ var (
 	port          = getEnv("PORT", "8080")
 	wsPath        = getEnv("WS_PATH", "/")
 	xhttpPath     = getEnv("XHTTP_PATH", "/xhttp")
-	grpcService   = getEnv("GRPC_SERVICE", "ProxyService")  // gRPC 服务名（不含包名前缀）
+	grpcService   = getEnv("GRPC_SERVICE", "ProxyService")  // gRPC 服务名（可自定义，客户端需配置相同名称）
 	paddingMin    = getEnvInt("PADDING_MIN", 100)
 	paddingMax    = getEnvInt("PADDING_MAX", 1000)
 	grpcMode      = false
