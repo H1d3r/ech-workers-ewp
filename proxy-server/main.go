@@ -153,14 +153,6 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 	}
 
 	content := firstMsg.GetContent()
-	// 调试：打印收到的原始数据摘要
-	if len(content) >= 32 {
-		fmt.Printf("[DEBUG] gRPC received: len=%d, first16=%x, last16=%x\n", 
-			len(content), content[:16], content[len(content)-16:])
-	} else {
-		fmt.Printf("[DEBUG] gRPC received: len=%d, data=%x\n", len(content), content)
-	}
-
 	req, respData, err := handleEWPHandshakeBinary(content, clientIP)
 	if err != nil {
 		stream.Send(&pb.SocketData{Content: respData})
@@ -459,12 +451,6 @@ func startXHTTPServer() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	
-	// 包装所有请求的日志中间件
-	loggedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[DEBUG] HTTP request received: %s %s %s from %s", r.Proto, r.Method, r.URL.Path, r.RemoteAddr)
-		mux.ServeHTTP(w, r)
-	})
-	
 	mux.HandleFunc(xhttpPath+"/", xhttpHandler)
 	mux.HandleFunc(xhttpPath, xhttpHandler)
 	mux.HandleFunc("/", disguiseHandler)
@@ -472,7 +458,7 @@ func startXHTTPServer() {
 	// 无 TLS 模式（通过 Cloudflare Tunnel 提供 TLS）
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           loggedHandler,
+		Handler:           mux,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// 注意：不设置 ReadTimeout 和 WriteTimeout，因为 stream-one 是长连接
@@ -484,12 +470,7 @@ func startXHTTPServer() {
 }
 
 func xhttpHandler(w http.ResponseWriter, r *http.Request) {
-	// 调试：打印所有进入的请求
-	log.Printf("[DEBUG] XHTTP request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
-	log.Printf("[DEBUG] X-Auth-Token: %s (expected: %s)", r.Header.Get("X-Auth-Token"), uuid)
-	
 	if r.Header.Get("X-Auth-Token") != uuid {
-		log.Printf("[DEBUG] Token mismatch, returning disguise page")
 		disguiseHandler(w, r)
 		return
 	}
@@ -760,8 +741,6 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
-
-	log.Printf("[DEBUG] XHTTP handshake: sessionID=%s, dataLen=%d", sessionID, len(handshakeData))
 
 	// 处理 EWP 握手
 	req, respData, err := handleEWPHandshakeBinary(handshakeData, clientIP)

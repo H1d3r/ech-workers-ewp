@@ -174,13 +174,8 @@ func DecodeHandshakeRequest(data []byte, validUUIDs [][16]byte) (*HandshakeReque
 	ciphertext := data[15 : 15+ciphertextLen]
 	authTag := data[15+ciphertextLen : 15+ciphertextLen+16]
 
-	// 调试：打印收到的数据摘要
-	fmt.Printf("[DEBUG] DecodeHandshakeRequest: dataLen=%d, version=%d, payloadLen=%d\n", len(data), version, payloadLen)
-	fmt.Printf("[DEBUG] authTag (received): %x\n", authTag)
-
-	for i, uuid := range validUUIDs {
+	for _, uuid := range validUUIDs {
 		expectedTag := computeHMAC(uuid, ad, ciphertext)
-		fmt.Printf("[DEBUG] UUID[%d] expectedTag: %x\n", i, expectedTag)
 		if !hmac.Equal(authTag, expectedTag) {
 			continue
 		}
