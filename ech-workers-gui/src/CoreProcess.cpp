@@ -219,6 +219,11 @@ void CoreProcess::onProcessFinished(int exitCode, QProcess::ExitStatus exitStatu
 
 void CoreProcess::onProcessError(QProcess::ProcessError error)
 {
+    // 优雅退出时忽略 Crashed 错误（Windows 上 terminate() 会触发此错误）
+    if (gracefulStop && error == QProcess::Crashed) {
+        return;
+    }
+    
     QString errorMsg;
     
     switch (error) {
