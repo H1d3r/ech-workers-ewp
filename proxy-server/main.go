@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"flag"
@@ -11,9 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	pb "proxy-server/proto"
@@ -21,6 +24,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/peer"
 )
 
 var (
@@ -32,6 +37,7 @@ var (
 	paddingMax    = getEnvInt("PADDING_MAX", 1000)
 	grpcMode      = false
 	xhttpMode     = false
+	enableFlow    = false
 	upgrader      = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 )
 
@@ -70,22 +76,30 @@ func getEnvInt(key string, def int) int {
 // Nginx disguise page
 const nginxHTML = `<!DOCTYPE html><html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>`
 
+
 func main() {
 	// 解析命令行参数
 	flag.BoolVar(&grpcMode, "grpc", false, "启用 gRPC 模式")
 	flag.BoolVar(&xhttpMode, "xhttp", false, "启用 XHTTP 模式")
+	flag.BoolVar(&enableFlow, "flow", false, "启用 EWP Flow 流控协议（Vision 风格）")
 	flag.StringVar(&port, "port", port, "监听端口")
 	flag.Parse()
 
-	// 也支持环境变量 MODE=grpc/xhttp
+	// 也支持环境变量 MODE=grpc/xhttp, ENABLE_FLOW=true/false
 	mode := os.Getenv("MODE")
 	if mode == "grpc" {
 		grpcMode = true
 	} else if mode == "xhttp" {
 		xhttpMode = true
 	}
+	if os.Getenv("ENABLE_FLOW") == "true" {
+		enableFlow = true
+	}
 
 	log.Printf("🔑 UUID: %s", uuid)
+	if enableFlow {
+		log.Printf("🌊 EWP Flow 协议已启用（Vision 风格流控）")
+	}
 
 	if err := initEWPHandler(uuid); err != nil {
 		log.Fatalf("❌ Failed to initialize EWP handler: %v", err)
@@ -124,7 +138,13 @@ type proxyServer struct {
 }
 
 func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
-	log.Println("🔗 gRPC client connected")
+	// 提取客户端 IP
+	clientIP := "unknown"
+	if p, ok := peer.FromContext(stream.Context()); ok {
+		clientIP = p.Addr.String()
+	}
+	
+	log.Printf("🔗 gRPC client connected from %s", clientIP)
 
 	firstMsg, err := stream.Recv()
 	if err != nil {
@@ -132,7 +152,16 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 		return err
 	}
 
-	req, respData, err := handleEWPHandshakeBinary(firstMsg.GetContent())
+	content := firstMsg.GetContent()
+	// 调试：打印收到的原始数据摘要
+	if len(content) >= 32 {
+		fmt.Printf("[DEBUG] gRPC received: len=%d, first16=%x, last16=%x\n", 
+			len(content), content[:16], content[len(content)-16:])
+	} else {
+		fmt.Printf("[DEBUG] gRPC received: len=%d, data=%x\n", len(content), content)
+	}
+
+	req, respData, err := handleEWPHandshakeBinary(content, clientIP)
 	if err != nil {
 		stream.Send(&pb.SocketData{Content: respData})
 		return nil
@@ -155,6 +184,16 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 
 	log.Printf("✅ gRPC connected to %s", target)
 
+	// 初始化 Flow State（如果启用）
+	var flowState *ewp.FlowState
+	var writeOnceUserUUID []byte
+	if enableFlow {
+		flowState = ewp.NewFlowState(req.UUID[:])
+		writeOnceUserUUID = make([]byte, 16)
+		copy(writeOnceUserUUID, req.UUID[:])
+		log.Printf("🌊 gRPC Flow 协议已启用")
+	}
+
 	// 双向转发
 	done := make(chan struct{}, 2)
 
@@ -166,7 +205,15 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 			if err != nil {
 				return
 			}
-			if _, err := remote.Write(msg.GetContent()); err != nil {
+
+			data := msg.GetContent()
+
+			// 处理 Flow 协议（移除填充）
+			if enableFlow && flowState != nil {
+				data = flowState.ProcessUplink(data)
+			}
+
+			if _, err := remote.Write(data); err != nil {
 				return
 			}
 		}
@@ -183,9 +230,18 @@ func (s *proxyServer) Tunnel(stream pb.ProxyService_TunnelServer) error {
 			if err != nil {
 				return
 			}
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			if err := stream.Send(&pb.SocketData{Content: data}); err != nil {
+
+			data := buf[:n]
+
+			// 应用 Flow 协议（添加填充）
+			if enableFlow && flowState != nil {
+				data = flowState.PadDownlink(data, &writeOnceUserUUID)
+			}
+
+			// 复制数据发送
+			sendData := make([]byte, len(data))
+			copy(sendData, data)
+			if err := stream.Send(&pb.SocketData{Content: sendData}); err != nil {
 				return
 			}
 		}
@@ -201,23 +257,195 @@ func startGRPCServer() {
 		log.Fatalf("❌ gRPC listen failed: %v", err)
 	}
 
-	s := grpc.NewServer()
+	kasp := keepalive.ServerParameters{
+		Time:    60 * time.Second,
+		Timeout: 10 * time.Second,
+	}
+	kaep := keepalive.EnforcementPolicy{
+		MinTime:             10 * time.Second,
+		PermitWithoutStream: true,
+	}
+
+	// 无 TLS 模式（通过 Cloudflare Tunnel 提供 TLS）
+	s := grpc.NewServer(
+		grpc.KeepaliveParams(kasp),
+		grpc.KeepaliveEnforcementPolicy(kaep),
+		grpc.MaxConcurrentStreams(100),
+		grpc.InitialWindowSize(1<<20),
+		grpc.InitialConnWindowSize(1<<20),
+		grpc.WriteBufferSize(32*1024),
+		grpc.ReadBufferSize(32*1024),
+	)
 	pb.RegisterProxyServiceServer(s, &proxyServer{})
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("🛑 Gracefully stopping gRPC server...")
+		s.GracefulStop()
+	}()
+
+	log.Println("� gRPC server listening (no TLS, behind Cloudflare Tunnel)")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("❌ gRPC serve failed: %v", err)
 	}
 }
 
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != wsPath {
+		disguiseHandler(w, r)
+		return
+	}
+
+	proto := r.Header.Get("Sec-WebSocket-Protocol")
+	if proto != uuid {
+		disguiseHandler(w, r)
+		return
+	}
+
+	if !websocket.IsWebSocketUpgrade(r) {
+		disguiseHandler(w, r)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, http.Header{"Sec-WebSocket-Protocol": {proto}})
+	if err != nil {
+		log.Printf("❌ Upgrade error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	log.Printf("✅ WebSocket connected: %s %s", r.Method, r.URL.Path)
+	handleWebSocket(conn, r.RemoteAddr)
+}
+
+// handleWebSocket 处理 EWP 协议（支持 Vision 流控）
+func handleWebSocket(conn *websocket.Conn, clientAddr string) {
+	// 读取第一帧数据
+	_, firstMsg, err := conn.ReadMessage()
+	if err != nil {
+		log.Printf("❌ Read first message error: %v", err)
+		return
+	}
+
+	if len(firstMsg) < 15 {
+		log.Printf("❌ Message too short: %d bytes", len(firstMsg))
+		return
+	}
+
+	handleSimpleProtocol(conn, firstMsg, clientAddr)
+}
+
+// handleSimpleProtocol 处理 EWP 协议（简单 WebSocket 模式）
+func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte, clientAddr string) {
+	req, respData, err := handleEWPHandshakeBinary(firstMsg, clientAddr)
+	if err != nil {
+		conn.WriteMessage(websocket.BinaryMessage, respData)
+		return
+	}
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, respData); err != nil {
+		log.Printf("❌ Failed to send handshake response: %v", err)
+		return
+	}
+
+	target := req.TargetAddr.String()
+	log.Printf("🔗 Simple WebSocket connecting to %s", target)
+
+	remote, err := net.Dial("tcp", target)
+	if err != nil {
+		log.Printf("❌ Dial error: %v", err)
+		return
+	}
+	defer remote.Close()
+
+	log.Printf("✅ Simple WebSocket connected to %s", target)
+
+	// 初始化 Flow State（如果启用）
+	var flowState *ewp.FlowState
+	var writeOnceUserUUID []byte
+	if enableFlow {
+		flowState = ewp.NewFlowState(req.UUID[:])
+		writeOnceUserUUID = make([]byte, 16)
+		copy(writeOnceUserUUID, req.UUID[:])
+		log.Printf("🌊 Flow 协议已启用")
+	}
+
+	// 双向转发
+	done := make(chan struct{}, 2)
+
+	// WebSocket -> remote
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			// 检查控制消息
+			if str := string(msg); str == "CLOSE" {
+				return
+			}
+
+			// 处理 Flow 协议（移除填充）
+			if enableFlow && flowState != nil {
+				msg = flowState.ProcessUplink(msg)
+			}
+
+			if _, err := remote.Write(msg); err != nil {
+				return
+			}
+		}
+	}()
+
+	// remote -> WebSocket
+	go func() {
+		defer func() { done <- struct{}{} }()
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+
+		for {
+			n, err := remote.Read(buf)
+			if err != nil {
+				return
+			}
+
+			data := buf[:n]
+
+			// 应用 Flow 协议（添加填充）
+			if enableFlow && flowState != nil {
+				data = flowState.PadDownlink(data, &writeOnceUserUUID)
+			}
+
+			// 复制数据发送
+			sendData := make([]byte, len(data))
+			copy(sendData, data)
+			if err := conn.WriteMessage(websocket.BinaryMessage, sendData); err != nil {
+				return
+			}
+		}
+	}()
+
+	<-done
+	// 发送关闭消息
+	conn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
+}
+
 // ======================== XHTTP 服务 (基于 Xray-core 实现) ========================
 
 type xhttpSession struct {
-	remote            net.Conn
-	uploadQueue       *uploadQueue
-	done              chan struct{}
-	isFullyConnected  chan struct{}
-	flowState         *ewp.FlowState
-	writeOnceUserUUID []byte
+	remote           net.Conn
+	uploadQueue      *uploadQueue
+	done             chan struct{}
+	isFullyConnected chan struct{}
+	closeOnce        sync.Once
 }
 
 var (
@@ -231,25 +459,37 @@ func startXHTTPServer() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	
+	// 包装所有请求的日志中间件
+	loggedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[DEBUG] HTTP request received: %s %s %s from %s", r.Proto, r.Method, r.URL.Path, r.RemoteAddr)
+		mux.ServeHTTP(w, r)
+	})
+	
 	mux.HandleFunc(xhttpPath+"/", xhttpHandler)
 	mux.HandleFunc(xhttpPath, xhttpHandler)
 	mux.HandleFunc("/", disguiseHandler)
 
+	// 无 TLS 模式（通过 Cloudflare Tunnel 提供 TLS）
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           mux,
+		Handler:           loggedHandler,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// 注意：不设置 ReadTimeout 和 WriteTimeout，因为 stream-one 是长连接
 	}
 
 	go cleanupExpiredSessions()
-	log.Println("� XHTTP server listening (no TLS, behind Cloudflare)")
+	log.Println("� XHTTP server listening (no TLS, behind Cloudflare Tunnel)")
 	log.Fatal(server.ListenAndServe())
 }
 
 func xhttpHandler(w http.ResponseWriter, r *http.Request) {
+	// 调试：打印所有进入的请求
+	log.Printf("[DEBUG] XHTTP request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	log.Printf("[DEBUG] X-Auth-Token: %s (expected: %s)", r.Header.Get("X-Auth-Token"), uuid)
+	
 	if r.Header.Get("X-Auth-Token") != uuid {
+		log.Printf("[DEBUG] Token mismatch, returning disguise page")
 		disguiseHandler(w, r)
 		return
 	}
@@ -357,9 +597,16 @@ func cleanupExpiredSessions() {
 }
 
 func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
+	// 获取客户端 IP
+	clientIP := r.RemoteAddr
+	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
+		clientIP = clientIP[:idx]
+	}
+
 	// 读取 EWP 握手请求（先读取 15 字节头部获取长度）
 	header := make([]byte, 15)
 	if _, err := io.ReadFull(r.Body, header); err != nil {
+		log.Printf("❌ XHTTP stream-one: Failed to read header: %v", err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
@@ -367,17 +614,18 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 	// 解析长度字段
 	plaintextLen := binary.BigEndian.Uint16(header[13:15])
 	totalLen := 15 + int(plaintextLen) + 16 + 16 // header + ciphertext + poly1305tag + hmac
-	
+
 	// 读取完整握手数据
 	handshakeData := make([]byte, totalLen)
 	copy(handshakeData[:15], header)
 	if _, err := io.ReadFull(r.Body, handshakeData[15:]); err != nil {
+		log.Printf("❌ XHTTP stream-one: Failed to read handshake: %v", err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	// 处理 EWP 握手
-	req, respData, err := handleEWPHandshakeBinary(handshakeData)
+	req, respData, err := handleEWPHandshakeBinary(handshakeData, clientIP)
 	if err != nil {
 		log.Printf("❌ XHTTP stream-one: EWP handshake failed: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
@@ -475,7 +723,7 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 		defer largeBufferPool.Put(buf)
 		writeOnceUserUUID := make([]byte, 16)
 		copy(writeOnceUserUUID, req.UUID[:])
-		
+
 		for {
 			n, err := remote.Read(buf)
 			if n > 0 {
@@ -492,51 +740,120 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// 等待任意一个方向完成（表示连接应该关闭）
 	<-done
+	// 注意：不需要等待两个 done，因为一方关闭后另一方也会因为读写错误而退出
 	log.Printf("✅ stream-one closed: %s", target)
 }
 
-func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+// xhttpHandshakeHandler 处理 stream-down 模式的 EWP 握手请求 (seq=0)
+func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+	clientIP := r.RemoteAddr
+	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
+		clientIP = clientIP[:idx]
+	}
+
+	// 读取 EWP 握手请求
+	handshakeData, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("❌ XHTTP handshake: Failed to read body: %v", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[DEBUG] XHTTP handshake: sessionID=%s, dataLen=%d", sessionID, len(handshakeData))
+
+	// 处理 EWP 握手
+	req, respData, err := handleEWPHandshakeBinary(handshakeData, clientIP)
+	if err != nil {
+		log.Printf("❌ XHTTP handshake: EWP failed: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(respData)
+		return
+	}
+
+	// 先创建 session（让 GET 请求可以找到它）
 	session := upsertSession(sessionID)
-	close(session.isFullyConnected)
+
+	// 连接目标服务器（使用请求 context，支持取消）
+	target := req.TargetAddr.String()
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	
+	var d net.Dialer
+	remote, err := d.DialContext(ctx, "tcp", target)
+	if err != nil {
+		log.Printf("❌ XHTTP handshake: Dial failed: %v", err)
+		xhttpSessions.Delete(sessionID) // 清理失败的 session
+		if ctx.Err() == context.Canceled {
+			// 客户端已取消，不需要返回错误
+			return
+		}
+		http.Error(w, "Connection failed", http.StatusBadGateway)
+		return
+	}
+
+	// 设置远程连接
+	session.remote = remote
+
+	log.Printf("✅ XHTTP handshake success: sessionID=%s, target=%s", sessionID, target)
+
+	// 返回 EWP 握手响应
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respData)
+}
+
+func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
+	// 等待 session 创建和 remote 就绪（最多等 15 秒）
+	var session *xhttpSession
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		val, ok := xhttpSessions.Load(sessionID)
+		if ok {
+			session = val.(*xhttpSession)
+			if session.remote != nil {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if session == nil {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	if session.remote == nil {
+		http.Error(w, "Session not ready (target connection timeout)", http.StatusGatewayTimeout)
+		return
+	}
+
+	session.closeOnce.Do(func() {
+		close(session.isFullyConnected)
+	})
 	defer xhttpSessions.Delete(sessionID)
 
-	if session.remote == nil {
-		target := r.Header.Get("X-Target")
-		if target == "" {
-			http.Error(w, "Missing target", http.StatusBadRequest)
-			return
-		}
-
-		remote, err := net.Dial("tcp", target)
-		if err != nil {
-			log.Printf("❌ Dial failed: %v", err)
-			http.Error(w, "Connection failed", http.StatusBadGateway)
-			return
-		}
-		session.remote = remote
-
-		go func() {
-			buf := largeBufferPool.Get().([]byte)
-			defer largeBufferPool.Put(buf)
-			for {
-				select {
-				case <-session.done:
-					return
-				default:
-					n, err := session.uploadQueue.Read(buf)
-					if n > 0 {
-						if _, e := remote.Write(buf[:n]); e != nil {
-							return
-						}
-					}
-					if err != nil {
+	// 启动上行数据处理（从 uploadQueue 写入 remote）
+	go func() {
+		buf := largeBufferPool.Get().([]byte)
+		defer largeBufferPool.Put(buf)
+		for {
+			select {
+			case <-session.done:
+				return
+			default:
+				n, err := session.uploadQueue.Read(buf)
+				if n > 0 {
+					if _, e := session.remote.Write(buf[:n]); e != nil {
 						return
 					}
 				}
+				if err != nil {
+					return
+				}
 			}
-		}()
-	}
+		}
+	}()
 
 	log.Printf("📥 stream-down GET: %s", sessionID)
 
@@ -556,15 +873,7 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 		default:
 			n, err := session.remote.Read(buf)
 			if n > 0 {
-				// 应用 Vision 流控填充（如果已初始化）
-				var writeData []byte
-				if session.flowState != nil {
-					writeData = session.flowState.PadDownlink(buf[:n], &session.writeOnceUserUUID)
-				} else {
-					writeData = buf[:n]
-				}
-				
-				if _, e := w.Write(writeData); e != nil {
+				if _, e := w.Write(buf[:n]); e != nil {
 					return
 				}
 				if flusher != nil {
@@ -579,75 +888,13 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 }
 
 func xhttpUploadHandler(w http.ResponseWriter, r *http.Request, sessionID, seqStr string) {
-	// seq=0 是 EWP 握手请求
+	// 检查是否是 seq=0 的握手请求
 	if seqStr == "0" {
-		session := upsertSession(sessionID)
-		
-		payload, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Read error", http.StatusBadRequest)
-			return
-		}
-
-		// 处理 EWP 握手
-		req, respData, err := handleEWPHandshakeBinary(payload)
-		if err != nil {
-			log.Printf("❌ XHTTP stream-down: EWP handshake failed: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write(respData)
-			return
-		}
-
-		target := req.TargetAddr.String()
-		log.Printf("🔗 stream-down handshake: %s, SessionID: %s", target, sessionID)
-
-		// 建立到目标的连接
-		remote, err := net.Dial("tcp", target)
-		if err != nil {
-			log.Printf("❌ Dial failed: %v", err)
-			http.Error(w, "Connection failed", http.StatusBadGateway)
-			return
-		}
-		session.remote = remote
-
-		// 初始化 Vision 流控状态
-		session.flowState = ewp.NewFlowState(req.UUID[:])
-		session.writeOnceUserUUID = make([]byte, 16)
-		copy(session.writeOnceUserUUID, req.UUID[:])
-
-		// 启动上行数据处理协程
-		go func() {
-			buf := largeBufferPool.Get().([]byte)
-			defer largeBufferPool.Put(buf)
-			for {
-				select {
-				case <-session.done:
-					return
-				default:
-					n, err := session.uploadQueue.Read(buf)
-					if n > 0 {
-						// 处理 Vision 流控（自动检测并解包）
-						processedData := session.flowState.ProcessUplink(buf[:n])
-						if len(processedData) > 0 {
-							if _, e := remote.Write(processedData); e != nil {
-								return
-							}
-						}
-					}
-					if err != nil {
-						return
-					}
-				}
-			}
-		}()
-
-		// 返回 EWP 握手响应
-		w.WriteHeader(http.StatusOK)
-		w.Write(respData)
+		// seq=0 是 EWP 握手请求，需要创建 session
+		xhttpHandshakeHandler(w, r, sessionID)
 		return
 	}
 
-	// 普通上行数据包
 	val, ok := xhttpSessions.Load(sessionID)
 	if !ok {
 		http.Error(w, "Session not found", http.StatusNotFound)
@@ -734,149 +981,6 @@ func generatePadding(minLen, maxLen int) string {
 		padding[i] = chars[padding[i]%byte(len(chars))]
 	}
 	return string(padding)
-}
-
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
-
-func wsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != wsPath {
-		disguiseHandler(w, r)
-		return
-	}
-
-	proto := r.Header.Get("Sec-WebSocket-Protocol")
-	if proto != uuid {
-		disguiseHandler(w, r)
-		return
-	}
-
-	if !websocket.IsWebSocketUpgrade(r) {
-		disguiseHandler(w, r)
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, http.Header{"Sec-WebSocket-Protocol": {proto}})
-	if err != nil {
-		log.Printf("❌ Upgrade error: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	log.Printf("✅ WebSocket connected: %s %s", r.Method, r.URL.Path)
-	handleWebSocket(conn)
-}
-
-// handleWebSocket 处理 EWP 协议（支持 Vision 流控）
-func handleWebSocket(conn *websocket.Conn) {
-	_, firstMsg, err := conn.ReadMessage()
-	if err != nil {
-		log.Printf("❌ Read first message error: %v", err)
-		return
-	}
-
-	if len(firstMsg) < 15 {
-		log.Printf("❌ Message too short: %d bytes", len(firstMsg))
-		return
-	}
-
-	handleSimpleProtocol(conn, firstMsg)
-}
-
-// handleSimpleProtocol 处理 EWP 协议（支持 Vision 流控自动检测）
-func handleSimpleProtocol(conn *websocket.Conn, firstMsg []byte) {
-	req, respData, err := handleEWPHandshakeBinary(firstMsg)
-	if err != nil {
-		conn.WriteMessage(websocket.BinaryMessage, respData)
-		return
-	}
-
-	if err := conn.WriteMessage(websocket.BinaryMessage, respData); err != nil {
-		log.Printf("❌ Failed to send handshake response: %v", err)
-		return
-	}
-
-	target := req.TargetAddr.String()
-	log.Printf("🔗 WebSocket connecting to %s", target)
-
-	remote, err := net.Dial("tcp", target)
-	if err != nil {
-		log.Printf("❌ Dial error: %v", err)
-		return
-	}
-	defer remote.Close()
-
-	log.Printf("✅ WebSocket connected to %s", target)
-
-	// 初始化 Vision 流控状态
-	flowState := ewp.NewFlowState(req.UUID[:])
-	writeOnceUserUUID := make([]byte, 16)
-	copy(writeOnceUserUUID, req.UUID[:])
-	
-	// 双向转发
-	done := make(chan struct{}, 2)
-
-	// WebSocket -> remote (uplink: 解包 Vision 填充)
-	go func() {
-		defer func() { done <- struct{}{} }()
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-			// 检查控制消息
-			if str := string(msg); str == "CLOSE" {
-				return
-			}
-			
-			// 处理 Vision 流控（自动检测并解包）
-			processedData := flowState.ProcessUplink(msg)
-			
-			if len(processedData) > 0 {
-				if _, err := remote.Write(processedData); err != nil {
-					return
-				}
-			}
-		}
-	}()
-
-	// remote -> WebSocket (downlink: 添加 Vision 填充)
-	go func() {
-		defer func() { done <- struct{}{} }()
-		buf := largeBufferPool.Get().([]byte)
-		defer largeBufferPool.Put(buf)
-
-		for {
-			n, err := remote.Read(buf)
-			if err != nil {
-				return
-			}
-			
-			// 过滤 TLS 流量
-			if flowState.NumberOfPacketToFilter > 0 {
-				flowState.XtlsFilterTls(buf[:n])
-			}
-			
-			// 应用 Vision 填充（如果需要）
-			var writeData []byte
-			if flowState.ShouldPad(false) {
-				writeData = flowState.PadDownlink(buf[:n], &writeOnceUserUUID)
-			} else {
-				writeData = buf[:n]
-			}
-			
-			if err := conn.WriteMessage(websocket.BinaryMessage, writeData); err != nil {
-				return
-			}
-		}
-	}()
-
-	<-done
-	// 发送关闭消息
-	conn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
 }
 
 // flushWriter 实现自动 flush 的 Writer
