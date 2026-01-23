@@ -95,8 +95,16 @@ void MainWindow::setupConnections()
 void MainWindow::setupSystemTray()
 {
     trayIcon = new QSystemTrayIcon(this);
-    trayIcon->setIcon(QIcon(":/icons/app.png"));
+    
+    // 使用系统默认图标，避免图标文件问题
+    trayIcon->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
     trayIcon->setToolTip("ECH Workers");
+    
+    // 检查系统托盘支持
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        qWarning() << "System tray is not available";
+        return;
+    }
     
     trayMenu = new QMenu(this);
     
@@ -121,7 +129,10 @@ void MainWindow::setupSystemTray()
     connect(trayIcon, &QSystemTrayIcon::activated, 
             this, &MainWindow::onTrayIconActivated);
     
-    trayIcon->show();
+    // 只有在系统托盘可用时才显示托盘图标
+    if (QSystemTrayIcon::isSystemTrayAvailable()) {
+        trayIcon->show();
+    }
 }
 
 void MainWindow::setupNodeTable()
@@ -424,12 +435,14 @@ void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason)
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (trayIcon->isVisible()) {
+    // 检查系统托盘是否可用
+    if (trayIcon && QSystemTrayIcon::isSystemTrayAvailable() && trayIcon->isVisible()) {
         hide();
         trayIcon->showMessage("ECH Workers", "程序已最小化到系统托盘", 
             QSystemTrayIcon::Information, 2000);
         event->ignore();
     } else {
+        // 没有托盘支持时直接退出
         event->accept();
     }
 }
