@@ -232,6 +232,23 @@
         </property>
        </widget>
       </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="labelPQC">
+        <property name="text">
+         <string>后量子加密</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QCheckBox" name="checkEnablePQC">
+        <property name="text">
+         <string>启用 X25519MLKEM768 (需要 Go 1.24+)</string>
+        </property>
+        <property name="checked">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -256,23 +273,6 @@
         </property>
         <property name="checked">
          <bool>true</bool>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="0">
-       <widget class="QLabel" name="labelPQC">
-        <property name="text">
-         <string>后量子加密</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1">
-       <widget class="QCheckBox" name="checkEnablePQC">
-        <property name="text">
-         <string>启用 X25519MLKEM768 (需要 Go 1.24+)</string>
-        </property>
-        <property name="checked">
-         <bool>false</bool>
         </property>
        </widget>
       </item>
@@ -361,13 +361,13 @@
   <connection>
    <sender>buttonBox</sender>
    <signal>accepted()</signal>
-   <receiver>EditNode</receiver>
+   <receiver>EditNodeDialog</receiver>
    <slot>accept()</slot>
   </connection>
   <connection>
    <sender>buttonBox</sender>
    <signal>rejected()</signal>
-   <receiver>EditNode</receiver>
+   <receiver>EditNodeDialog</receiver>
    <slot>reject()</slot>
   </connection>
  </connections>

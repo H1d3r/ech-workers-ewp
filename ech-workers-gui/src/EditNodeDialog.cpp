@@ -142,6 +142,7 @@ void EditNodeDialog::updateVisibility()
     bool echEnabled = ui->checkEnableECH->isChecked();
     ui->editECHDomain->setEnabled(echEnabled);
     ui->editDNS->setEnabled(echEnabled);
+    ui->checkEnablePQC->setEnabled(echEnabled);
     
     // 调整对话框大小
     adjustSize();
