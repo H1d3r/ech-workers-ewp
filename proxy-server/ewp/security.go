@@ -74,26 +74,35 @@ func (c *NonceCache) cleanup() {
 
 // RateLimiter 实现 IP 级别的速率限制（防 DoS）
 type RateLimiter struct {
-	mu       sync.RWMutex
-	entries  map[string]*rateLimitEntry
-	maxRate  int           // 每秒最大请求数
-	banTime  time.Duration // 封禁时长
+	mu               sync.RWMutex
+	entries          map[string]*rateLimitEntry
+	maxRate          int           // 每秒最大请求数
+	banTime          time.Duration // 封禁时长
+	failureThreshold int           // 失败次数阈值（达到后才封禁）
 }
 
 type rateLimitEntry struct {
-	count      int
-	resetTime  int64
-	bannedUntil int64
+	count         int
+	resetTime     int64
+	bannedUntil   int64
+	failureCount  int   // 失败计数器
+	lastFailTime  int64 // 上次失败时间
 }
 
 // NewRateLimiter 创建速率限制器
 // maxRate: 每秒最大请求数
 // banTime: 超限后的封禁时长
-func NewRateLimiter(maxRate int, banTime time.Duration) *RateLimiter {
+// failureThreshold: 失败次数阈值（达到后才封禁，0表示首次失败就封禁）
+func NewRateLimiter(maxRate int, banTime time.Duration, failureThreshold int) *RateLimiter {
+	if failureThreshold < 1 {
+		failureThreshold = 1 // 至少1次
+	}
+	
 	limiter := &RateLimiter{
-		entries: make(map[string]*rateLimitEntry),
-		maxRate: maxRate,
-		banTime: banTime,
+		entries:          make(map[string]*rateLimitEntry),
+		maxRate:          maxRate,
+		banTime:          banTime,
+		failureThreshold: failureThreshold,
 	}
 	
 	// 启动清理 goroutine
@@ -144,7 +153,7 @@ func (r *RateLimiter) Allow(ip string) bool {
 	return true
 }
 
-// RecordFailure 记录认证失败（多次失败可延长封禁）
+// RecordFailure 记录认证失败（渐进式封禁）
 func (r *RateLimiter) RecordFailure(ip string) {
 	now := time.Now().Unix()
 	
@@ -153,16 +162,42 @@ func (r *RateLimiter) RecordFailure(ip string) {
 	
 	entry, exists := r.entries[ip]
 	if !exists {
+		// 新 IP 首次失败，只记录不封禁
 		r.entries[ip] = &rateLimitEntry{
-			count:       1,
-			resetTime:   now + 1,
-			bannedUntil: now + int64(r.banTime.Seconds()),
+			count:        1,
+			resetTime:    now + 1,
+			failureCount: 1,
+			lastFailTime: now,
 		}
 		return
 	}
 	
-	// 延长封禁时间（每次失败增加封禁时间）
-	entry.bannedUntil = now + int64(r.banTime.Seconds())
+	// 如果距离上次失败超过60秒，重置失败计数器（容忍偶发错误）
+	if now-entry.lastFailTime > 60 {
+		entry.failureCount = 1
+		entry.lastFailTime = now
+		return
+	}
+	
+	// 累加失败次数
+	entry.failureCount++
+	entry.lastFailTime = now
+	
+	// 只有连续失败达到阈值才封禁
+	if entry.failureCount >= r.failureThreshold {
+		entry.bannedUntil = now + int64(r.banTime.Seconds())
+	}
+}
+
+// RecordSuccess 记录认证成功（重置失败计数器）
+func (r *RateLimiter) RecordSuccess(ip string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	
+	if entry, exists := r.entries[ip]; exists {
+		entry.failureCount = 0
+		entry.lastFailTime = 0
+	}
 }
 
 // cleanup 定期清理过期的条目（每 5 分钟）

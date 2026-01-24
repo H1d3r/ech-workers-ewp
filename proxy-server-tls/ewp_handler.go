@@ -42,9 +42,9 @@ func initEWPHandler(uuidStr string) error {
 	
 	// 初始化安全组件
 	nonceCache = ewp.NewNonceCache()
-	rateLimiter = ewp.NewRateLimiter(20, 30*time.Second) // 每秒最多 20 次握手，超限封禁 30 秒
+	rateLimiter = ewp.NewRateLimiter(100, 10*time.Second, 3) // 每秒100次握手，封禁10秒，3次失败后封禁
 	
-	log.Printf("[EWP] Security: Nonce cache and rate limiter initialized")
+	log.Printf("[EWP] Security: Nonce cache and rate limiter initialized (maxRate=100/s, banTime=10s, threshold=3)")
 	
 	return nil
 }
@@ -105,6 +105,9 @@ func handleEWPHandshake(reader io.Reader, clientIP string) (*ewp.HandshakeReques
 		return nil, ewp.GenerateFakeResponse(), err
 	}
 
+	// === 5. 记录认证成功，重置失败计数器 ===
+	rateLimiter.RecordSuccess(clientIP)
+
 	log.Printf("✅ EWP: Handshake successful from %s, target: %s", clientIP, req.TargetAddr.String())
 	return req, respData, nil
 }
@@ -140,6 +143,9 @@ func handleEWPHandshakeBinary(data []byte, clientIP string) (*ewp.HandshakeReque
 		log.Printf("❌ EWP: Failed to encode response: %v", err)
 		return nil, ewp.GenerateFakeResponse(), err
 	}
+
+	// === 5. 记录认证成功，重置失败计数器 ===
+	rateLimiter.RecordSuccess(clientIP)
 
 	log.Printf("✅ EWP: Handshake successful from %s, target: %s", clientIP, req.TargetAddr.String())
 	return req, respData, nil
