@@ -172,8 +172,8 @@ func (r *RateLimiter) RecordFailure(ip string) {
 		return
 	}
 	
-	// 如果距离上次失败超过60秒，重置失败计数器（容忍偶发错误）
-	if now-entry.lastFailTime > 60 {
+	// 如果距离上次失败超过120秒，重置失败计数器（容忍偶发错误）
+	if now-entry.lastFailTime > 120 {
 		entry.failureCount = 1
 		entry.lastFailTime = now
 		return

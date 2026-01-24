@@ -42,9 +42,9 @@ func initEWPHandler(uuidStr string) error {
 	
 	// 初始化安全组件
 	nonceCache = ewp.NewNonceCache()
-	rateLimiter = ewp.NewRateLimiter(100, 10*time.Second, 3) // 每秒100次握手，封禁10秒，3次失败后封禁
+	rateLimiter = ewp.NewRateLimiter(300, 5*time.Second, 5) // 每秒300次握手，封禁5秒，5次失败后封禁
 	
-	log.Printf("[EWP] Security: Nonce cache and rate limiter initialized (maxRate=100/s, banTime=10s, threshold=3)")
+	log.Printf("[EWP] Security: Nonce cache and rate limiter initialized (maxRate=300/s, banTime=5s, threshold=5)")
 	
 	return nil
 }
