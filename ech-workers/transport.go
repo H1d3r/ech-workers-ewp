@@ -1003,8 +1003,33 @@ func (c *GRPCConn) Connect(target string, initialData []byte) error {
 	}
 
 	if len(initialData) > 0 {
-		if err := c.Write(initialData); err != nil {
-			return fmt.Errorf("send initial data: %w", err)
+		// 添加重试机制，解决Windows平台下的连接状态问题
+		var writeErr error
+		for retry := 0; retry < 3; retry++ {
+			if retry > 0 {
+				// 短暂等待后重试
+				time.Sleep(time.Duration(retry*10) * time.Millisecond)
+			}
+			
+			if err := c.Write(initialData); err != nil {
+				writeErr = err
+				// 检查是否是可重试的错误
+				if retry < 2 && (err == io.EOF || 
+					strings.Contains(err.Error(), "connection reset") ||
+					strings.Contains(err.Error(), "broken pipe") ||
+					strings.Contains(err.Error(), "use of closed network connection")) {
+					logV("[gRPC] 发送初始数据失败，重试 %d/3: %v", retry+1, err)
+					continue
+				}
+				break
+			} else {
+				writeErr = nil
+				break
+			}
+		}
+		
+		if writeErr != nil {
+			return fmt.Errorf("send initial data: %w", writeErr)
 		}
 	}
 
@@ -1034,6 +1059,11 @@ func (c *GRPCConn) Write(data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 检查流状态，避免在已关闭的流上发送数据
+	if c.stream == nil {
+		return io.EOF
+	}
+
 	// 应用 Flow 协议（如果启用）
 	var writeData []byte
 	if c.enableFlow && c.flowState != nil {
@@ -1042,7 +1072,17 @@ func (c *GRPCConn) Write(data []byte) error {
 		writeData = data
 	}
 
-	return c.stream.SendMsg(&pb.SocketData{Content: writeData})
+	err := c.stream.SendMsg(&pb.SocketData{Content: writeData})
+	if err != nil {
+		// 如果是连接相关的错误，标记流为已关闭
+		if strings.Contains(err.Error(), "transport is closing") ||
+		   strings.Contains(err.Error(), "connection reset") ||
+		   strings.Contains(err.Error(), "broken pipe") {
+			// 流已关闭，后续调用应直接返回EOF
+			return io.EOF
+		}
+	}
+	return err
 }
 
 func (c *GRPCConn) Close() error {
