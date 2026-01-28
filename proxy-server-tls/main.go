@@ -19,6 +19,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 var (
@@ -121,8 +123,26 @@ func main() {
 		log.Fatalf("❌ 无效的后端地址: %v", err)
 	}
 
+	// 创建支持 HTTP/2 的 Transport
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: false,
+		},
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	
+	// 显式启用 HTTP/2
+	if err := http2.ConfigureTransport(transport); err != nil {
+		log.Printf("⚠️ HTTP/2 配置失败，将回退到 HTTP/1.1: %v", err)
+	}
+
 	// 创建反向代理
 	proxy := httputil.NewSingleHostReverseProxy(backend)
+	proxy.Transport = transport
 	
 	// 自定义 Director 以保留原始 Host
 	originalDirector := proxy.Director
@@ -171,6 +191,7 @@ func main() {
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"h2", "http/1.1"},
 		}
 	} else {
 		// 使用指定的证书文件
@@ -181,6 +202,7 @@ func main() {
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"h2", "http/1.1"},
 		}
 		log.Printf("🔐 使用证书: %s", certFile)
 	}
@@ -195,7 +217,7 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	log.Printf("🚀 HTTPS 反向代理已启动")
+	log.Printf("🚀 HTTPS 反向代理已启动 (支持 HTTP/2)")
 	log.Printf("   监听: https://0.0.0.0:%s", port)
 	log.Printf("   后端: %s", backendURL)
 
