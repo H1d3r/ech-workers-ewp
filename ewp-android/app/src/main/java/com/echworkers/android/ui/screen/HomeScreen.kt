@@ -332,8 +332,9 @@ private fun NodeCard(
     onDelete: () -> Unit
 ) {
     Card(
-        onClick = if (!isConnected) onSelect else {},
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !isConnected) { onSelect() },
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) 
                 MaterialTheme.colorScheme.primaryContainer 

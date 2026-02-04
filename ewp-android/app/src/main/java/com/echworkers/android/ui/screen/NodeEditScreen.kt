@@ -293,6 +293,7 @@ fun NodeEditScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SegmentedButton(
     options: List<String>,
