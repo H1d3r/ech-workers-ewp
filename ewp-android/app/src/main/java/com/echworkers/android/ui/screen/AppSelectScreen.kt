@@ -168,6 +168,7 @@ fun AppSelectScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProxyModeSelector(
     selectedMode: ProxyMode,
