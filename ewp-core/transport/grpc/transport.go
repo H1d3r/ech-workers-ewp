@@ -162,8 +162,6 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	
 	// Resolve serverIP if it's a domain name
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		log.Printf("[gRPC] Configured serverIP is a domain (%s), resolving...", resolvedIP)
-		
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		
@@ -174,17 +172,14 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[gRPC] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+			log.V("[gRPC] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
 		} else {
-			log.Printf("[gRPC] No IPs returned for serverIP %s", t.serverIP)
 			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
 		}
 	}
 	
 	// If no serverIP specified, resolve using bootstrap resolver (DoH over H2)
 	if resolvedIP == "" && !isIPAddress(parsed.Host) {
-		log.Printf("[gRPC] Resolving server address: %s", parsed.Host)
-		
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		
@@ -195,14 +190,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[gRPC] Bootstrap resolved %s -> %s", parsed.Host, resolvedIP)
-		} else {
-			log.Printf("[gRPC] No IPs returned for %s", parsed.Host)
 		}
-	} else if isIPAddress(parsed.Host) {
-		log.Printf("[gRPC] Server address is already an IP: %s", parsed.Host)
-	} else if resolvedIP != "" {
-		log.Printf("[gRPC] Using resolved server IP: %s", resolvedIP)
 	}
 	
 	if resolvedIP != "" {

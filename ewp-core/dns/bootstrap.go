@@ -160,11 +160,11 @@ func (r *BootstrapResolver) LookupIP(ctx context.Context, domain string) ([]net.
 	// Try each transport in order until one succeeds
 	var lastErr error
 	for i, transport := range r.transports {
-		log.Printf("[Bootstrap] Resolving %s via %s (#%d)...", domain, transport.Type(), i+1)
+		log.V("[Bootstrap] Resolving %s via %s (#%d)...", domain, transport.Type(), i+1)
 
 		ips, err := r.queryWithTransport(ctx, transport, domain)
 		if err != nil {
-			log.Printf("[Bootstrap] %s (#%d) failed: %v", transport.Type(), i+1, err)
+			log.V("[Bootstrap] %s (#%d) failed: %v", transport.Type(), i+1, err)
 			lastErr = err
 			continue
 		}
@@ -176,7 +176,7 @@ func (r *BootstrapResolver) LookupIP(ctx context.Context, domain string) ([]net.
 				expiresAt: time.Now().Add(r.cacheTTL),
 			})
 			
-			log.Printf("[Bootstrap] Resolved %s -> %v (via %s)", domain, ips, transport.Type())
+			log.Printf("[Bootstrap] Resolved %s -> %s", domain, ips[0].String())
 			return ips, nil
 		}
 	}

@@ -254,8 +254,6 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	
 	// Resolve serverIP if it's a domain name
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		log.Printf("[H3] Configured serverIP is a domain (%s), resolving...", resolvedIP)
-		
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		
@@ -266,17 +264,14 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[H3] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+			log.V("[H3] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
 		} else {
-			log.Printf("[H3] No IPs returned for serverIP %s", t.serverIP)
 			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
 		}
 	}
 	
 	// If no serverIP specified, resolve using bootstrap resolver (DoH over H2)
 	if resolvedIP == "" && !isIPAddress(host) {
-		log.Printf("[H3] Resolving server address: %s", host)
-		
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		
@@ -287,14 +282,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.Printf("[H3] Bootstrap resolved %s -> %s", host, resolvedIP)
-		} else {
-			log.Printf("[H3] No IPs returned for %s", host)
 		}
-	} else if isIPAddress(host) {
-		log.Printf("[H3] Server address is already an IP: %s", host)
-	} else if resolvedIP != "" {
-		log.Printf("[H3] Using resolved server IP: %s", resolvedIP)
 	}
 	
 	// Use resolved IP if available

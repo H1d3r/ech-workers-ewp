@@ -55,7 +55,7 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 			// Dial TCP connection
 			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
-				log.Printf("[DoH Bootstrap] TCP dial failed: %v", err)
+				log.V("[DoH Bootstrap] TCP dial failed: %v", err)
 				return nil, err
 			}
 			
@@ -63,7 +63,7 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 			tlsConn := tls.Client(conn, cfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				conn.Close()
-				log.Printf("[DoH Bootstrap] TLS handshake failed: %v", err)
+				log.V("[DoH Bootstrap] TLS handshake failed: %v", err)
 				return nil, err
 			}
 			
@@ -83,7 +83,7 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 
 // Query performs a DNS query via DoH using HTTP/2 POST method (RFC 8484)
 func (t *DoHTransport) Query(ctx context.Context, domain string, qtype uint16) ([]net.IP, error) {
-	log.Printf("[DoH Bootstrap] Querying %s (type %d) via %s", domain, qtype, t.serverURL)
+	log.V("[DoH Bootstrap] Querying %s (type %d) via %s", domain, qtype, t.serverURL)
 	
 	// Build DNS query
 	dnsQuery := BuildQuery(domain, qtype)
@@ -122,11 +122,11 @@ func (t *DoHTransport) Query(ctx context.Context, domain string, qtype uint16) (
 	// Parse DNS response
 	ips, err := parseDNSResponse(body, qtype)
 	if err != nil {
-		log.Printf("[DoH Bootstrap] Failed to parse response for %s: %v", domain, err)
+		log.V("[DoH Bootstrap] Failed to parse response for %s: %v", domain, err)
 		return nil, fmt.Errorf("failed to parse DNS response: %w", err)
 	}
 	
-	log.Printf("[DoH Bootstrap] Resolved %s -> %v (%d IPs)", domain, ips, len(ips))
+	log.V("[DoH Bootstrap] Resolved %s -> %v (%d IPs)", domain, ips, len(ips))
 
 	return ips, nil
 }
