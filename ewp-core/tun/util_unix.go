@@ -4,7 +4,12 @@ package tun
 
 import (
 	"net"
+	"os"
 )
+
+func IsAdmin() bool {
+	return os.Geteuid() == 0
+}
 
 func parseIPv4(s string) net.IP {
 	ip := net.ParseIP(s)
