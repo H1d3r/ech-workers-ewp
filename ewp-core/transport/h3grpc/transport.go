@@ -247,6 +247,27 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	addr := net.JoinHostPort(host, port)
 	resolvedIP := t.serverIP
 	
+	// Resolve serverIP if it's a domain name
+	if resolvedIP != "" && !isIPAddress(resolvedIP) {
+		log.Printf("[H3] Configured serverIP is a domain (%s), resolving...", resolvedIP)
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		ips, err := t.bootstrapResolver.LookupIP(ctx, resolvedIP)
+		if err != nil {
+			log.Printf("[H3] Bootstrap DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			return nil, fmt.Errorf("bootstrap DNS resolution failed for serverIP: %w", err)
+		}
+		if len(ips) > 0 {
+			resolvedIP = ips[0].String()
+			log.Printf("[H3] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+		} else {
+			log.Printf("[H3] No IPs returned for serverIP %s", t.serverIP)
+			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
+		}
+	}
+	
 	// If no serverIP specified, resolve using bootstrap resolver (DoH over H2)
 	if resolvedIP == "" && !isIPAddress(host) {
 		log.Printf("[H3] Resolving server address: %s", host)
@@ -267,8 +288,8 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		}
 	} else if isIPAddress(host) {
 		log.Printf("[H3] Server address is already an IP: %s", host)
-	} else {
-		log.Printf("[H3] Using pre-configured server IP: %s", t.serverIP)
+	} else if resolvedIP != "" {
+		log.Printf("[H3] Using resolved server IP: %s", resolvedIP)
 	}
 	
 	// Use resolved IP if available

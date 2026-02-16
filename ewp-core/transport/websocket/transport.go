@@ -1,6 +1,7 @@
 ﻿package websocket
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 
 	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
+	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
@@ -16,19 +18,20 @@ import (
 
 // Transport implements WebSocket transport
 type Transport struct {
-	serverAddr  string
-	serverIP    string
-	token       string
-	password    string  // Trojan password
-	uuid        [16]byte
-	useECH      bool
-	enableFlow  bool
-	enablePQC   bool
-	useTrojan   bool    // Use Trojan protocol instead of EWP
-	path        string
-	host        string
-	headers     map[string]string
-	echManager  *commontls.ECHManager
+	serverAddr        string
+	serverIP          string
+	token             string
+	password          string  // Trojan password
+	uuid              [16]byte
+	useECH            bool
+	enableFlow        bool
+	enablePQC         bool
+	useTrojan         bool    // Use Trojan protocol instead of EWP
+	path              string
+	host              string
+	headers           map[string]string
+	echManager        *commontls.ECHManager
+	bootstrapResolver *dns.BootstrapResolver
 }
 
 // New creates a new WebSocket transport
@@ -51,19 +54,23 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 		path = "/"
 	}
 
+	// Initialize bootstrap resolver (DoH over H2)
+	bootstrapResolver := dns.NewBootstrapResolver("")
+
 	return &Transport{
-		serverAddr: serverAddr,
-		serverIP:   serverIP,
-		token:      token,
-		password:   password,
-		uuid:       uuid,
-		useECH:     useECH,
-		enableFlow: enableFlow,
-		enablePQC:  enablePQC,
-		useTrojan:  useTrojan,
-		path:       path,
-		headers:    make(map[string]string),
-		echManager: echMgr,
+		serverAddr:        serverAddr,
+		serverIP:          serverIP,
+		token:             token,
+		password:          password,
+		uuid:              uuid,
+		useECH:            useECH,
+		enableFlow:        enableFlow,
+		enablePQC:         enablePQC,
+		useTrojan:         useTrojan,
+		path:              path,
+		headers:           make(map[string]string),
+		echManager:        echMgr,
+		bootstrapResolver: bootstrapResolver,
 	}, nil
 }
 
@@ -110,18 +117,59 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		return nil, err
 	}
 
+	// Resolve serverIP if it's a domain name
+	resolvedIP := t.serverIP
+	if resolvedIP != "" && !isIPAddress(resolvedIP) {
+		log.Printf("[WebSocket] Configured serverIP is a domain (%s), resolving...", resolvedIP)
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		ips, err := t.bootstrapResolver.LookupIP(ctx, resolvedIP)
+		if err != nil {
+			log.Printf("[WebSocket] Bootstrap DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			return nil, fmt.Errorf("bootstrap DNS resolution failed for serverIP: %w", err)
+		}
+		if len(ips) > 0 {
+			resolvedIP = ips[0].String()
+			log.Printf("[WebSocket] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+		} else {
+			log.Printf("[WebSocket] No IPs returned for serverIP %s", t.serverIP)
+			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
+		}
+	}
+
+	// If no serverIP, resolve serverAddr
+	if resolvedIP == "" && !isIPAddress(parsed.Host) {
+		log.Printf("[WebSocket] Resolving server address: %s", parsed.Host)
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		ips, err := t.bootstrapResolver.LookupIP(ctx, parsed.Host)
+		if err != nil {
+			log.Printf("[WebSocket] Bootstrap DNS resolution failed for %s: %v", parsed.Host, err)
+			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
+		}
+		if len(ips) > 0 {
+			resolvedIP = ips[0].String()
+			log.Printf("[WebSocket] Bootstrap resolved %s -> %s", parsed.Host, resolvedIP)
+		}
+	}
+
 	// Configure dialer with TCP Fast Open support
 	dialer := websocket.Dialer{
 		TLSClientConfig:  stdConfig,
 		HandshakeTimeout: 10 * time.Second,
 		NetDial: func(network, address string) (net.Conn, error) {
-			// Use custom server IP if provided
-			if t.serverIP != "" {
+			// Use resolved IP if available
+			if resolvedIP != "" {
 				_, p, err := net.SplitHostPort(address)
 				if err != nil {
 					return nil, err
 				}
-				address = net.JoinHostPort(t.serverIP, p)
+				address = net.JoinHostPort(resolvedIP, p)
+				log.Printf("[WebSocket] Connecting to: %s (SNI: %s)", address, parsed.Host)
 			}
 			// Use TCP Fast Open for reduced latency
 			return commonnet.DialTFO(network, address, 10*time.Second)
@@ -154,3 +202,8 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	}
 	return NewSimpleConn(wsConn, t.token), nil
 }
+  
+// isIPAddress checks if a string is an IP address  
+func isIPAddress(s string) bool {  
+	return net.ParseIP(s) != nil  
+} 
