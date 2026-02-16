@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -44,31 +43,26 @@ func NewDoHTransport(serverURL string) *DoHTransport {
 	}
 }
 
-// Query performs a DNS query via DoH
+// Query performs a DNS query via DoH using HTTP/2 POST method (RFC 8484)
 func (t *DoHTransport) Query(ctx context.Context, domain string, qtype uint16) ([]net.IP, error) {
 	// Build DNS query
 	dnsQuery := BuildQuery(domain, qtype)
-	dnsBase64 := base64.RawURLEncoding.EncodeToString(dnsQuery)
 
-	// Build request URL
+	// Parse server URL
 	u, err := url.Parse(t.serverURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid DoH URL: %w", err)
 	}
 
-	q := u.Query()
-	q.Set("dns", dnsBase64)
-	u.RawQuery = q.Encode()
-
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	// Create HTTP POST request with DNS query as body
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), bytes.NewReader(dnsQuery))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 
-	// Send request via H2
+	// Send request via HTTP/2
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("DoH request failed: %w", err)

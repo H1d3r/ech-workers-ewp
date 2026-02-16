@@ -1,7 +1,7 @@
 ﻿package dns
 
 import (
-	"encoding/base64"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +35,7 @@ func (c *Client) QueryHTTPS(domain string) (string, error) {
 	return c.Query(domain, constant.TypeHTTPS)
 }
 
-// Query performs a DoH query
+// Query performs a DoH query using POST method (RFC 8484)
 func (c *Client) Query(domain string, qtype uint16) (string, error) {
 	u, err := url.Parse(c.ServerURL)
 	if err != nil {
@@ -44,15 +44,9 @@ func (c *Client) Query(domain string, qtype uint16) (string, error) {
 
 	// Build DNS query
 	dnsQuery := BuildQuery(domain, qtype)
-	dnsBase64 := base64.RawURLEncoding.EncodeToString(dnsQuery)
 
-	// Add query parameter
-	q := u.Query()
-	q.Set("dns", dnsBase64)
-	u.RawQuery = q.Encode()
-
-	// Create HTTP request
-	req, err := http.NewRequest("GET", u.String(), nil)
+	// Create HTTP POST request with DNS query as body
+	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(dnsQuery))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -90,19 +84,15 @@ func (c *Client) Query(domain string, qtype uint16) (string, error) {
 	return echBase64, nil
 }
 
-// QueryRaw performs a raw DoH query (for DNS proxy support)
+// QueryRaw performs a raw DoH query using POST method (RFC 8484)
 func (c *Client) QueryRaw(dnsQuery []byte) ([]byte, error) {
 	u, err := url.Parse(c.ServerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid DoH URL: %w", err)
 	}
 
-	dnsBase64 := base64.RawURLEncoding.EncodeToString(dnsQuery)
-	q := u.Query()
-	q.Set("dns", dnsBase64)
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequest("GET", u.String(), nil)
+	// Create HTTP POST request with raw DNS query as body
+	req, err := http.NewRequest("POST", u.String(), bytes.NewReader(dnsQuery))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

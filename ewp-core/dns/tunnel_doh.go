@@ -3,7 +3,6 @@ package dns
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -45,7 +44,7 @@ func NewTunnelDoHClient(dohServer string, trans transport.Transport) *TunnelDoHC
 	return NewTunnelDoHTransport(dohServer, trans)
 }
 
-// QueryRaw performs a raw DNS query through the proxy tunnel
+// QueryRaw performs a raw DNS query through the proxy tunnel using HTTP/2 POST (RFC 8484)
 func (c *TunnelDoHTransport) QueryRaw(ctx context.Context, dnsQuery []byte) ([]byte, error) {
 	// Establish tunnel connection
 	conn, err := c.transport.Dial()
@@ -60,12 +59,6 @@ func (c *TunnelDoHTransport) QueryRaw(ctx context.Context, dnsQuery []byte) ([]b
 		return nil, fmt.Errorf("invalid DoH URL: %w", err)
 	}
 
-	// Build HTTP request
-	dnsBase64 := base64.RawURLEncoding.EncodeToString(dnsQuery)
-	q := u.Query()
-	q.Set("dns", dnsBase64)
-	u.RawQuery = q.Encode()
-
 	// Determine target for tunnel
 	targetHost := u.Hostname()
 	targetPort := u.Port()
@@ -79,13 +72,16 @@ func (c *TunnelDoHTransport) QueryRaw(ctx context.Context, dnsQuery []byte) ([]b
 		return nil, fmt.Errorf("tunnel connect failed: %w", err)
 	}
 
-	// Build HTTP GET request
-	httpReq := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nConnection: close\r\n\r\n",
-		u.RequestURI(), u.Hostname())
+	// Build HTTP POST request (RFC 8484 recommends POST over GET)
+	httpReq := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		u.Path, u.Hostname(), len(dnsQuery))
 
-	// Send HTTP request through tunnel
+	// Send HTTP headers and DNS query body
 	if err := conn.Write([]byte(httpReq)); err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request headers: %w", err)
+	}
+	if err := conn.Write(dnsQuery); err != nil {
+		return nil, fmt.Errorf("failed to send request body: %w", err)
 	}
 
 	// Read HTTP response
