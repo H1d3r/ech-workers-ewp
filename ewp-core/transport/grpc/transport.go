@@ -155,23 +155,56 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	addr := net.JoinHostPort(parsed.Host, parsed.Port)
 	resolvedIP := t.serverIP
 	
+	// Resolve serverIP if it's a domain name
+	if resolvedIP != "" && !isIPAddress(resolvedIP) {
+		log.Printf("[gRPC] Configured serverIP is a domain (%s), resolving...", resolvedIP)
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		ips, err := t.bootstrapResolver.LookupIP(ctx, resolvedIP)
+		if err != nil {
+			log.Printf("[gRPC] Bootstrap DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			return nil, fmt.Errorf("bootstrap DNS resolution failed for serverIP: %w", err)
+		}
+		if len(ips) > 0 {
+			resolvedIP = ips[0].String()
+			log.Printf("[gRPC] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+		} else {
+			log.Printf("[gRPC] No IPs returned for serverIP %s", t.serverIP)
+			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
+		}
+	}
+	
 	// If no serverIP specified, resolve using bootstrap resolver (DoH over H2)
 	if resolvedIP == "" && !isIPAddress(parsed.Host) {
+		log.Printf("[gRPC] Resolving server address: %s", parsed.Host)
+		
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		
 		ips, err := t.bootstrapResolver.LookupIP(ctx, parsed.Host)
 		if err != nil {
+			log.Printf("[gRPC] Bootstrap DNS resolution failed for %s: %v", parsed.Host, err)
 			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.V("[gRPC] Bootstrap resolved %s -> %s", parsed.Host, resolvedIP)
+			log.Printf("[gRPC] Bootstrap resolved %s -> %s", parsed.Host, resolvedIP)
+		} else {
+			log.Printf("[gRPC] No IPs returned for %s", parsed.Host)
 		}
+	} else if isIPAddress(parsed.Host) {
+		log.Printf("[gRPC] Server address is already an IP: %s", parsed.Host)
+	} else if resolvedIP != "" {
+		log.Printf("[gRPC] Using resolved server IP: %s", resolvedIP)
 	}
 	
 	if resolvedIP != "" {
 		addr = net.JoinHostPort(resolvedIP, parsed.Port)
+		log.Printf("[gRPC] Connecting to: %s (SNI: %s)", addr, parsed.Host)
+	} else {
+		log.Printf("[gRPC] Connecting to: %s", addr)
 	}
 
 	conn, err := t.getOrCreateConn(parsed.Host, addr)

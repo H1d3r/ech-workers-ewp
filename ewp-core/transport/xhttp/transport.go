@@ -7,32 +7,34 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"time"
 
 	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
+	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
 	"golang.org/x/net/http2"
-	"net/http/httptrace"
 )
 
 type Transport struct {
-	serverAddr   string
-	serverIP     string
-	token        string
-	password     string // Trojan password
-	uuid         [16]byte
-	uuidStr      string
-	useECH       bool
-	enableFlow   bool
-	enablePQC    bool
-	useTrojan    bool // Use Trojan protocol
-	path         string
-	mode         string
-	echManager   *commontls.ECHManager
+	serverAddr        string
+	serverIP          string
+	token             string
+	password          string // Trojan password
+	uuid              [16]byte
+	uuidStr           string
+	useECH            bool
+	enableFlow        bool
+	enablePQC         bool
+	useTrojan         bool // Use Trojan protocol
+	path              string
+	mode              string
+	echManager        *commontls.ECHManager
+	bootstrapResolver *dns.BootstrapResolver
 
 	// Xray-core 风格的随机化配置
 	paddingBytes     RangeConfig  // Referer padding 大小
@@ -89,20 +91,24 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 		HKeepAlivePeriod: 30, // Keep-Alive 30 秒
 	}
 
+	// Initialize bootstrap resolver (DoH over H2)
+	bootstrapResolver := dns.NewBootstrapResolver("")
+
 	return &Transport{
-		serverAddr:   serverAddr,
-		serverIP:     serverIP,
-		token:        token,
-		password:     password,
-		uuid:         uuid,
-		uuidStr:      token,
-		useECH:       useECH,
-		enableFlow:   enableFlow,
-		enablePQC:    enablePQC,
-		useTrojan:    useTrojan,
-		path:         path,
-		mode:         "stream-one",
-		echManager:   echManager,
+		serverAddr:        serverAddr,
+		serverIP:          serverIP,
+		token:             token,
+		password:          password,
+		uuid:              uuid,
+		uuidStr:           token,
+		useECH:            useECH,
+		enableFlow:        enableFlow,
+		enablePQC:         enablePQC,
+		useTrojan:         useTrojan,
+		path:              path,
+		mode:              "stream-one",
+		echManager:        echManager,
+		bootstrapResolver: bootstrapResolver,
 
 		// 随机化配置 - 基于 Xray-core
 		paddingBytes:     RangeConfig{From: 50, To: 200},   // Referer padding
@@ -286,9 +292,50 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 
 	stdConfig.NextProtos = []string{"h2"}
 
+	// Resolve serverIP if it's a domain name
+	resolvedIP := t.serverIP
+	if resolvedIP != "" && !isIPAddress(resolvedIP) {
+		log.Printf("[XHTTP] Configured serverIP is a domain (%s), resolving...", resolvedIP)
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		ips, err := t.bootstrapResolver.LookupIP(ctx, resolvedIP)
+		if err != nil {
+			log.Printf("[XHTTP] Bootstrap DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			return nil, fmt.Errorf("bootstrap DNS resolution failed for serverIP: %w", err)
+		}
+		if len(ips) > 0 {
+			resolvedIP = ips[0].String()
+			log.Printf("[XHTTP] Bootstrap resolved serverIP %s -> %s", t.serverIP, resolvedIP)
+		} else {
+			log.Printf("[XHTTP] No IPs returned for serverIP %s", t.serverIP)
+			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
+		}
+	}
+
+	// If no serverIP, resolve serverAddr
+	if resolvedIP == "" && !isIPAddress(host) {
+		log.Printf("[XHTTP] Resolving server address: %s", host)
+		
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		ips, err := t.bootstrapResolver.LookupIP(ctx, host)
+		if err != nil {
+			log.Printf("[XHTTP] Bootstrap DNS resolution failed for %s: %v", host, err)
+			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
+		}
+		if len(ips) > 0 {
+			resolvedIP = ips[0].String()
+			log.Printf("[XHTTP] Bootstrap resolved %s -> %s", host, resolvedIP)
+		}
+	}
+
 	target := net.JoinHostPort(host, port)
-	if t.serverIP != "" {
-		target = net.JoinHostPort(t.serverIP, port)
+	if resolvedIP != "" {
+		target = net.JoinHostPort(resolvedIP, port)
+		log.Printf("[XHTTP] Connecting to: %s (SNI: %s)", target, host)
 	}
 
 	// HTTP/2 Transport 配置 - 参考 Xray-core ChromeH2KeepAlivePeriod
@@ -417,3 +464,8 @@ func (t *Transport) dialStreamDown() (transport.TunnelConn, error) {
 		t, // 传递 Transport 以获取新功能
 	), nil
 }
+  
+// isIPAddress checks if a string is an IP address  
+func isIPAddress(s string) bool {  
+	return net.ParseIP(s) != nil  
+} 
