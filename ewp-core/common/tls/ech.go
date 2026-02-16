@@ -1,6 +1,7 @@
 ﻿package tls
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sync"
@@ -63,8 +64,11 @@ func (m *ECHManager) Refresh() error {
 		return errors.New("no ECH parameter found")
 	}
 
-	// ECH data from HTTPS record is already raw binary, not base64 encoded
-	echList := []byte(echBase64)
+	// Decode base64 ECH data
+	echList, err := base64.StdEncoding.DecodeString(echBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode ECH config: %w", err)
+	}
 
 	// Update ECH list and fetch timestamp
 	m.mu.Lock()
