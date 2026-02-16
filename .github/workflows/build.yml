@@ -1,0 +1,220 @@
+name: Build EWP-Workers
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-core-client:
+    name: Build EWP-Core Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ewp-core
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Build Client - Windows amd64
+        run: |
+          cd cmd/client
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-client-windows-amd64.exe .
+      
+      - name: Build Client - Windows arm64
+        run: |
+          cd cmd/client
+          GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-client-windows-arm64.exe .
+      
+      - name: Build Client - Linux amd64
+        run: |
+          cd cmd/client
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-client-linux-amd64 .
+      
+      - name: Build Client - Linux arm64
+        run: |
+          cd cmd/client
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-client-linux-arm64 .
+      
+      - name: Build Client - macOS amd64
+        run: |
+          cd cmd/client
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-client-darwin-amd64 .
+      
+      - name: Build Client - macOS arm64
+        run: |
+          cd cmd/client
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-client-darwin-arm64 .
+      
+      - name: Upload Client Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-core-client-binaries
+          path: ewp-core/ewp-core-client-*
+
+  build-core-server:
+    name: Build EWP-Core Server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ewp-core
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Build Server - Linux amd64
+        run: |
+          cd cmd/server
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-server-linux-amd64 .
+      
+      - name: Build Server - Linux arm64
+        run: |
+          cd cmd/server
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-server-linux-arm64 .
+      
+      - name: Build Server - Windows amd64
+        run: |
+          cd cmd/server
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o ../../ewp-core-server-windows-amd64.exe .
+      
+      - name: Build Server - macOS arm64
+        run: |
+          cd cmd/server
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o ../../ewp-core-server-darwin-arm64 .
+      
+      - name: Upload Server Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-core-server-binaries
+          path: ewp-core/ewp-core-server-*
+
+  build-gui-windows:
+    name: Build EWP-GUI (Windows)
+    runs-on: windows-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.6.*'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          cache: true
+      
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+      
+      - name: Build GUI - Windows x64
+        run: |
+          cd ewp-gui
+          mkdir build-x64
+          cd build-x64
+          cmake .. -DCMAKE_BUILD_TYPE=Release -G "NMake Makefiles"
+          nmake
+          move EWP-GUI.exe ..\..\ewp-gui-windows-amd64.exe
+      
+      - name: Upload GUI Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-gui-windows-binaries
+          path: ewp-gui-windows-*.exe
+
+  build-gui-linux:
+    name: Build EWP-GUI (Linux)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.6.*'
+          host: 'linux'
+          target: 'desktop'
+          cache: true
+      
+      - name: Build GUI - Linux x64
+        run: |
+          cd ewp-gui
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+          mv EWP-GUI ../../ewp-gui-linux-amd64
+      
+      - name: Upload GUI Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-gui-linux-binaries
+          path: ewp-gui-linux-*
+
+  build-gui-macos:
+    name: Build EWP-GUI (macOS)
+    runs-on: macos-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.6.*'
+          host: 'mac'
+          target: 'desktop'
+          cache: true
+      
+      - name: Build GUI - macOS arm64
+        run: |
+          cd ewp-gui
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
+          make -j$(sysctl -n hw.ncpu)
+          mv EWP-GUI.app ../../ewp-gui-darwin-arm64.app || mv EWP-GUI ../../ewp-gui-darwin-arm64
+      
+      - name: Build GUI - macOS x64
+        run: |
+          cd ewp-gui
+          mkdir build-x64
+          cd build-x64
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
+          make -j$(sysctl -n hw.ncpu)
+          mv EWP-GUI.app ../../ewp-gui-darwin-amd64.app || mv EWP-GUI ../../ewp-gui-darwin-amd64
+      
+      - name: Upload GUI macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ewp-gui-macos-binaries
+          path: ewp-gui-darwin-*
+
+  summary:
+    name: Build Summary
+    needs: [build-core-client, build-core-server, build-gui-windows, build-gui-linux, build-gui-macos]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check Build Status
+        run: |
+          echo "=== Build Summary ==="
+          echo "Core Client: ${{ needs.build-core-client.result }}"
+          echo "Core Server: ${{ needs.build-core-server.result }}"
+          echo "GUI Windows: ${{ needs.build-gui-windows.result }}"
+          echo "GUI Linux: ${{ needs.build-gui-linux.result }}"
+          echo "GUI macOS: ${{ needs.build-gui-macos.result }}"
