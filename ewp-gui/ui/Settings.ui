@@ -6,9 +6,15 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>400</width>
-    <height>300</height>
+    <width>550</width>
+    <height>600</height>
    </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>500</width>
+    <height>550</height>
+   </size>
   </property>
   <property name="windowTitle">
    <string>设置</string>
@@ -69,6 +75,63 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="dnsGroup">
+     <property name="title">
+      <string>DNS 设置</string>
+     </property>
+     <layout class="QFormLayout" name="dnsLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelBootstrapDNS">
+        <property name="text">
+         <string>引导 DNS</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <layout class="QVBoxLayout">
+        <item>
+         <widget class="QLineEdit" name="editBootstrapDNS">
+          <property name="text">
+           <string>doq:dns.alidns.com:853, doh:https://dns.alidns.com/dns-query, doh:https://1.1.1.1/dns-query</string>
+          </property>
+          <property name="placeholderText">
+           <string>用于解析代理服务器域名（逗号分隔）</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelBootstrapDNSHint">
+          <property name="text">
+           <string>格式: protocol:address (支持 doq/doh/dot，逗号分隔，自动容灾)</string>
+          </property>
+          <property name="styleSheet">
+           <string>color: gray; font-size: 10px;</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelTunnelDNS">
+        <property name="text">
+         <string>隧道 DNS 服务器</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLineEdit" name="editTunnelDNS">
+        <property name="text">
+         <string>doq:dns.google:853, doh:https://dns.google/dns-query, dot:dns.google:853</string>
+        </property>
+        <property name="placeholderText">
+         <string>TUN模式下使用，逗号分隔</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="QGroupBox" name="tunGroup">
      <property name="title">
       <string>TUN 模式设置</string>
@@ -77,28 +140,92 @@
       <item row="0" column="0">
        <widget class="QLabel" name="labelTunIP">
         <property name="text">
-         <string>TUN IP</string>
+         <string>IPv4 地址</string>
         </property>
        </widget>
       </item>
       <item row="0" column="1">
        <widget class="QLineEdit" name="editTunIP">
         <property name="text">
-         <string>10.0.85.2</string>
+         <string>10.0.85.2/24</string>
+        </property>
+        <property name="placeholderText">
+         <string>CIDR 格式，如 10.0.85.2/24</string>
         </property>
        </widget>
       </item>
       <item row="1" column="0">
-       <widget class="QLabel" name="labelTunGateway">
+       <widget class="QLabel" name="labelTunMTU">
         <property name="text">
-         <string>TUN 网关</string>
+         <string>MTU</string>
         </property>
        </widget>
       </item>
       <item row="1" column="1">
-       <widget class="QLineEdit" name="editTunGateway">
+       <widget class="QSpinBox" name="spinTunMTU">
+        <property name="minimum">
+         <number>1280</number>
+        </property>
+        <property name="maximum">
+         <number>9000</number>
+        </property>
+        <property name="value">
+         <number>1380</number>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="labelTunStack">
         <property name="text">
-         <string>10.0.85.1</string>
+         <string>网络栈</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QComboBox" name="comboTunStack">
+        <item>
+         <property name="text">
+          <string>system</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>gvisor</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="labelTunAutoRoute">
+        <property name="text">
+         <string>自动路由</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QCheckBox" name="checkTunAutoRoute">
+        <property name="text">
+         <string>启用自动路由配置</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="labelTunStrictRoute">
+        <property name="text">
+         <string>严格路由</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QCheckBox" name="checkTunStrictRoute">
+        <property name="text">
+         <string>启用严格路由模式</string>
+        </property>
+        <property name="checked">
+         <bool>false</bool>
         </property>
        </widget>
       </item>

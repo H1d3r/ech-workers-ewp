@@ -1,9 +1,14 @@
 #include "CoreProcess.h"
+#include "ConfigGenerator.h"
+#include "SettingsDialog.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QDebug>
 #include <QNetworkRequest>
 #include <QUrl>
+#include <QStandardPaths>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 CoreProcess::CoreProcess(QObject *parent)
     : QObject(parent)
@@ -53,7 +58,15 @@ bool CoreProcess::start(const EWPNode &node, bool tunMode)
         return false;
     }
     
-    QStringList args = buildArguments(node, tunMode);
+    configFilePath = generateConfigFile(node, tunMode);
+    if (configFilePath.isEmpty()) {
+        lastError = "生成配置文件失败";
+        emit errorOccurred(lastError);
+        return false;
+    }
+    
+    QStringList args;
+    args << "-c" << configFilePath;
     
     process = new QProcess(this);
     
@@ -94,6 +107,12 @@ void CoreProcess::stop()
         if (process->waitForFinished(500)) {
             delete process;
             process = nullptr;
+            
+            // 清理临时配置文件
+            if (!configFilePath.isEmpty() && QFile::exists(configFilePath)) {
+                QFile::remove(configFilePath);
+            }
+            
             return;
         }
     }
@@ -107,6 +126,11 @@ void CoreProcess::stop()
     
     delete process;
     process = nullptr;
+    
+    // 清理临时配置文件
+    if (!configFilePath.isEmpty() && QFile::exists(configFilePath)) {
+        QFile::remove(configFilePath);
+    }
 }
 
 void CoreProcess::sendQuitRequest()
@@ -127,86 +151,21 @@ bool CoreProcess::isRunning() const
     return process && process->state() == QProcess::Running;
 }
 
-QStringList CoreProcess::buildArguments(const EWPNode &node, bool tunMode)
+QString CoreProcess::generateConfigFile(const EWPNode &node, bool tunMode)
 {
-    QStringList args;
+    SettingsDialog::AppSettings settings = SettingsDialog::loadFromRegistry();
+    QJsonObject config = ConfigGenerator::generateClientConfig(node, settings, tunMode);
     
-    // 监听地址
-    args << "-l" << listenAddr;
+    QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    QString configPath = tempDir + "/ewp-gui-config.json";
     
-    // 服务器地址 (包含路径)
-    QString serverUrl;
-    switch (node.transportMode) {
-        case EWPNode::WS:
-            serverUrl = QString("wss://%1:%2%3")
-                .arg(node.serverAddress)
-                .arg(node.serverPort)
-                .arg(node.wsPath);
-            args << "-mode" << "ws";
-            break;
-        case EWPNode::GRPC:
-            serverUrl = QString("grpcs://%1:%2/%3")
-                .arg(node.serverAddress)
-                .arg(node.serverPort)
-                .arg(node.grpcServiceName);
-            args << "-mode" << "grpc";
-            break;
-        case EWPNode::XHTTP:
-            serverUrl = QString("https://%1:%2%3")
-                .arg(node.serverAddress)
-                .arg(node.serverPort)
-                .arg(node.xhttpPath);
-            args << "-mode" << "xhttp";
-            args << "-xhttp-mode" << node.xhttpMode;
-            break;
+    if (!ConfigGenerator::saveConfig(config, configPath)) {
+        qWarning() << "Failed to save config to:" << configPath;
+        return QString();
     }
     
-    args << "-f" << serverUrl;
-    
-    // 应用层协议配置
-    if (node.appProtocol == EWPNode::TROJAN) {
-        args << "-protocol" << "trojan";
-        args << "-password" << node.trojanPassword;
-    } else {
-        args << "-token" << node.uuid;
-    }
-    
-    // 优选 IP
-    if (!node.serverIP.isEmpty()) {
-        args << "-ip" << node.serverIP;
-    }
-    
-    // ECH 配置
-    if (!node.enableECH) {
-        args << "-fallback";
-    } else {
-        if (!node.echDomain.isEmpty()) {
-            args << "-ech" << node.echDomain;
-        }
-        if (!node.dnsServer.isEmpty()) {
-            args << "-dns" << node.dnsServer;
-        }
-    }
-    
-    // 高级配置 (仅 EWP 协议)
-    if (node.appProtocol == EWPNode::EWP) {
-        if (!node.enableFlow) {
-            args << "-flow=false";
-        }
-    }
-    if (node.enablePQC) {
-        args << "-pqc";
-    }
-    
-    // TUN 模式
-    if (tunMode) {
-        args << "-tun";
-    }
-    
-    // 控制服务器（用于优雅退出）
-    args << "-control" << "127.0.0.1:0";
-    
-    return args;
+    qDebug() << "Generated config file:" << configPath;
+    return configPath;
 }
 
 void CoreProcess::onProcessStarted()

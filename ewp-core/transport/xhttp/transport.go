@@ -58,17 +58,17 @@ type Transport struct {
 	xmuxManager *XmuxManager
 }
 
-func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echManager *commontls.ECHManager) *Transport {
+func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
 	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, false, path, echManager)
 }
 
-func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) *Transport {
+func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echManager *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
 		uuid, err = transport.ParseUUID(token)
 		if err != nil {
-			log.Printf("[XHTTP] Unable to parse UUID: %v", err)
+			return nil, fmt.Errorf("invalid UUID: %w", err)
 		}
 	}
 
@@ -123,7 +123,7 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 		// Xmux 连接池配置
 		xmuxConfig: xmuxConfig,
 		xmuxManager: nil, // 延迟初始化
-	}
+	}, nil
 }
 
 func (t *Transport) SetMode(mode string) *Transport {

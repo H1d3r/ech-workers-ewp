@@ -7,10 +7,13 @@
 #include <QCloseEvent>
 #include <QSettings>
 #include <QUuid>
+#include <QMenuBar>
+#include <QAction>
 
 #include "ShareLink.h"
 #include "NodeTester.h"
 #include "EditNodeDialog.h"
+#include "SettingsDialog.h"
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -28,6 +31,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupConnections();
     setupSystemTray();
     setupNodeTable();
+    setupMenu();
     loadSettings();
     
     updateNodeList();
@@ -145,6 +149,47 @@ void MainWindow::setupNodeTable()
     ui->nodeTable->setAlternatingRowColors(true);
     ui->nodeTable->horizontalHeader()->setStretchLastSection(true);
     ui->nodeTable->verticalHeader()->setVisible(false);
+}
+
+void MainWindow::setupMenu()
+{
+    QMenuBar *menuBar = new QMenuBar(this);
+    setMenuBar(menuBar);
+    
+    // 文件菜单
+    QMenu *fileMenu = menuBar->addMenu("文件(&F)");
+    
+    QAction *settingsAction = new QAction("设置(&S)...", this);
+    settingsAction->setShortcut(QKeySequence("Ctrl+,"));
+    connect(settingsAction, &QAction::triggered, this, &MainWindow::onShowSettings);
+    fileMenu->addAction(settingsAction);
+    
+    fileMenu->addSeparator();
+    
+    QAction *quitAction = new QAction("退出(&Q)", this);
+    quitAction->setShortcut(QKeySequence::Quit);
+    connect(quitAction, &QAction::triggered, this, &QMainWindow::close);
+    fileMenu->addAction(quitAction);
+    
+    // 帮助菜单
+    QMenu *helpMenu = menuBar->addMenu("帮助(&H)");
+    
+    QAction *aboutAction = new QAction("关于(&A)...", this);
+    connect(aboutAction, &QAction::triggered, this, [this]() {
+        QMessageBox::about(this, "关于 EWP GUI", 
+            "EWP GUI v1.0.0\n\n基于 Qt 的 EWP-Core 图形界面客户端");
+    });
+    helpMenu->addAction(aboutAction);
+}
+
+void MainWindow::onShowSettings()
+{
+    SettingsDialog dialog(this);
+    if (dialog.exec() == QDialog::Accepted) {
+        appendLog("⚙️ 设置已保存");
+        // 重新加载CoreProcess配置
+        // coreProcess可能需要重启以应用新配置
+    }
 }
 
 void MainWindow::updateNodeList()

@@ -10,6 +10,7 @@ import (
 
 	commonnet "ewp-core/common/net"
 	commontls "ewp-core/common/tls"
+	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
 
@@ -49,20 +50,22 @@ type Transport struct {
 	permitWithoutStream bool
 	initialWindowSize   int32
 	userAgent           string
+	contentType         string
 	echManager          *commontls.ECHManager
+	bootstrapResolver   *dns.BootstrapResolver
 }
 
-func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) *Transport {
+func New(serverAddr, serverIP, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
 	return NewWithProtocol(serverAddr, serverIP, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
 }
 
-func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) *Transport {
+func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
 		uuid, err = transport.ParseUUID(uuidStr)
 		if err != nil {
-			log.Printf("[gRPC] Unable to parse UUID: %v", err)
+			return nil, fmt.Errorf("invalid UUID: %w", err)
 		}
 	}
 
@@ -70,6 +73,9 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 		serviceName = "ProxyService"
 	}
 	serviceName = strings.TrimPrefix(serviceName, "/")
+
+	// Initialize bootstrap resolver (DoH over H2)
+	bootstrapResolver := dns.NewBootstrapResolver("")
 
 	return &Transport{
 		serverAddr:          serverAddr,
@@ -87,9 +93,11 @@ func NewWithProtocol(serverAddr, serverIP, uuidStr, password string, useECH, ena
 		healthCheckTimeout:  0,
 		permitWithoutStream: false,
 		initialWindowSize:   0,
-		userAgent:           "",
+		userAgent:           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+		contentType:         "application/octet-stream",
 		echManager:          echManager,
-	}
+		bootstrapResolver:   bootstrapResolver,
+	}, nil
 }
 
 func (t *Transport) SetAuthority(authority string) *Transport {
@@ -111,6 +119,13 @@ func (t *Transport) SetInitialWindowSize(size int32) *Transport {
 
 func (t *Transport) SetUserAgent(userAgent string) *Transport {
 	t.userAgent = userAgent
+	return t
+}
+
+func (t *Transport) SetContentType(contentType string) *Transport {
+	if contentType != "" {
+		t.contentType = contentType
+	}
 	return t
 }
 
@@ -138,8 +153,25 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	}
 
 	addr := net.JoinHostPort(parsed.Host, parsed.Port)
-	if t.serverIP != "" {
-		addr = net.JoinHostPort(t.serverIP, parsed.Port)
+	resolvedIP := t.serverIP
+	
+	// If no serverIP specified, resolve using bootstrap resolver (DoH over H2)
+	if resolvedIP == "" && !isIPAddress(parsed.Host) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		
+		ips, err := t.bootstrapResolver.LookupIP(ctx, parsed.Host)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
+		}
+		if len(ips) > 0 {
+			resolvedIP = ips[0].String()
+			log.V("[gRPC] Bootstrap resolved %s -> %s", parsed.Host, resolvedIP)
+		}
+	}
+	
+	if resolvedIP != "" {
+		addr = net.JoinHostPort(resolvedIP, parsed.Port)
 	}
 
 	conn, err := t.getOrCreateConn(parsed.Host, addr)
@@ -257,4 +289,9 @@ func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error)
 	log.V("[gRPC] New connection: %s", addr)
 
 	return conn, nil
+}
+
+// isIPAddress checks if a string is a valid IP address
+func isIPAddress(s string) bool {
+	return net.ParseIP(s) != nil
 }

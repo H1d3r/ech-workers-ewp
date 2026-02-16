@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"time"
 
@@ -36,7 +35,16 @@ func EstablishTunnel(ctx context.Context, handshakeData []byte, opts TunnelOptio
 	}
 
 	if result.IsUDP {
-		return fmt.Errorf("UDP not implemented in generic tunnel")
+		log.Info("[Tunnel] UDP mode: %s -> %s", opts.ClientIP, result.Target)
+		
+		// Create io.Reader/io.Writer adapter for TransportAdapter
+		rw := &transportReaderWriter{transport: opts.Transport}
+		
+		// Handle UDP stream through tunnel
+		HandleUDPConnection(rw, rw)
+		
+		log.Info("[Tunnel] UDP closed: %s -> %s", opts.ClientIP, result.Target)
+		return nil
 	}
 
 	dialCtx := ctx
@@ -68,4 +76,26 @@ func EstablishTunnel(ctx context.Context, handshakeData []byte, opts TunnelOptio
 
 	log.Info("[Tunnel] Closed: %s -> %s", opts.ClientIP, result.Target)
 	return nil
+}
+
+// transportReaderWriter adapts TransportAdapter to io.Reader/io.Writer interface
+type transportReaderWriter struct {
+	transport TransportAdapter
+}
+
+func (t *transportReaderWriter) Read(p []byte) (n int, err error) {
+	data, err := t.transport.Read()
+	if err != nil {
+		return 0, err
+	}
+	n = copy(p, data)
+	return n, nil
+}
+
+func (t *transportReaderWriter) Write(p []byte) (n int, err error) {
+	err = t.transport.Write(p)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }

@@ -151,12 +151,17 @@
         </item>
         <item>
          <property name="text">
-          <string>gRPC</string>
+          <string>gRPC (HTTP/2)</string>
          </property>
         </item>
         <item>
          <property name="text">
           <string>XHTTP</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>H3gRPC (HTTP/3)</string>
          </property>
         </item>
        </widget>
@@ -191,11 +196,11 @@
      </layout>
     </widget>
    </item>
-   <!-- gRPC 配置 -->
+   <!-- gRPC / H3gRPC 配置 -->
    <item>
     <widget class="QGroupBox" name="grpcGroup">
      <property name="title">
-      <string>gRPC 配置</string>
+      <string>gRPC / H3gRPC 配置</string>
      </property>
      <layout class="QFormLayout" name="grpcLayout">
       <item row="0" column="0">
@@ -208,10 +213,38 @@
       <item row="0" column="1">
        <widget class="QLineEdit" name="editGrpcService">
         <property name="text">
-         <string>ProxyService</string>
+         <string>api</string>
         </property>
         <property name="placeholderText">
-         <string>与服务端 GRPC_SERVICE 环境变量对应</string>
+         <string>与服务端配置对应，默认: api</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelUserAgent">
+        <property name="text">
+         <string>User-Agent (Anti-DPI)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLineEdit" name="editUserAgent">
+        <property name="placeholderText">
+         <string>留空使用默认浏览器 UA</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="labelContentType">
+        <property name="text">
+         <string>Content-Type (Anti-DPI)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QLineEdit" name="editContentType">
+        <property name="placeholderText">
+         <string>留空使用默认 (application/octet-stream)</string>
         </property>
        </widget>
       </item>

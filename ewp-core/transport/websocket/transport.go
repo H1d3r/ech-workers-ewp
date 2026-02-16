@@ -32,18 +32,18 @@ type Transport struct {
 }
 
 // New creates a new WebSocket transport
-func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) *Transport {
+func New(serverAddr, serverIP, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
 	return NewWithProtocol(serverAddr, serverIP, token, "", useECH, enableFlow, false, false, path, echMgr)
 }
 
 // NewWithProtocol creates a new WebSocket transport with protocol selection
-func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) *Transport {
+func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
 		uuid, err = transport.ParseUUID(token)
 		if err != nil {
-			log.Warn("Failed to parse UUID, using token as-is: %v", err)
+			return nil, fmt.Errorf("invalid UUID: %w", err)
 		}
 	}
 
@@ -64,7 +64,7 @@ func NewWithProtocol(serverAddr, serverIP, token, password string, useECH, enabl
 		path:       path,
 		headers:    make(map[string]string),
 		echManager: echMgr,
-	}
+	}, nil
 }
 
 // Name returns transport name
