@@ -55,7 +55,7 @@ func (t *DoQTransport) Query(ctx context.Context, domain string, qtype uint16) (
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// Establish QUIC connection
+	// Establish QUIC connection (server should be IP:port to avoid DNS lookup)
 	conn, err := quic.DialAddr(ctx, t.server, t.tlsConfig, t.quicConfig)
 	if err != nil {
 		return nil, fmt.Errorf("QUIC dial failed: %w", err)

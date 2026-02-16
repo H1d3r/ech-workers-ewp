@@ -44,7 +44,7 @@ func (t *DoTTransport) Query(ctx context.Context, domain string, qtype uint16) (
 	// Build DNS query
 	dnsQuery := BuildQuery(domain, qtype)
 
-	// Connect with timeout
+	// Connect with timeout (server should be IP:port to avoid DNS lookup)
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
 	}

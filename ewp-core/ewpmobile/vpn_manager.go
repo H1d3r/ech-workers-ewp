@@ -116,7 +116,8 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 		}
 		dnsServer := config.DNSServer
 		if dnsServer == "" {
-			dnsServer = "dns.alidns.com/dns-query"
+			// Use IP address to avoid DNS dependency (Alibaba Cloud DNS)
+			dnsServer = "https://223.5.5.5/dns-query"
 		}
 		
 		echMgr = tls.NewECHManager(echDomain, dnsServer)

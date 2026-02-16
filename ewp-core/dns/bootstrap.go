@@ -41,8 +41,9 @@ func NewBootstrapResolver(serversConfig string) *BootstrapResolver {
 
 	// Parse servers configuration
 	if serversConfig == "" {
-		// Default: Alibaba Cloud DoH + Cloudflare DoH (for China users)
-		serversConfig = "doh:https://dns.alidns.com/dns-query, doh:https://1.1.1.1/dns-query"
+		// Default: Use IP addresses to avoid chicken-and-egg problem
+		// Alibaba DNS: 223.5.5.5, Cloudflare: 1.1.1.1, Google: 8.8.8.8
+		serversConfig = "doh:https://223.5.5.5/dns-query, doh:https://1.1.1.1/dns-query, doh:https://8.8.8.8/dns-query"
 	}
 
 	servers := parseBootstrapServers(serversConfig)
@@ -96,6 +97,10 @@ func parseBootstrapServers(config string) []ServerConfig {
 			continue
 		}
 
+		// Convert domain names to IP addresses for bootstrap DNS servers
+		// This avoids chicken-and-egg problem (DNS server needs DNS to resolve)
+		address = resolveBootstrapServerAddress(protocol, address)
+
 		servers = append(servers, ServerConfig{
 			Type:    protocol,
 			Address: address,
@@ -103,6 +108,41 @@ func parseBootstrapServers(config string) []ServerConfig {
 	}
 
 	return servers
+}
+
+// resolveBootstrapServerAddress converts common DNS server domains to IPs
+// This avoids needing DNS to resolve the DNS server itself
+func resolveBootstrapServerAddress(protocol, address string) string {
+	// Map of well-known DNS servers
+	knownServers := map[string]string{
+		// Alibaba Cloud DNS
+		"dns.alidns.com":                    "223.5.5.5",
+		"https://dns.alidns.com/dns-query":  "https://223.5.5.5/dns-query",
+		
+		// Cloudflare DNS
+		"1.1.1.1":                           "1.1.1.1",
+		"https://1.1.1.1/dns-query":         "https://1.1.1.1/dns-query",
+		"cloudflare-dns.com":                "1.1.1.1",
+		"https://cloudflare-dns.com/dns-query": "https://1.1.1.1/dns-query",
+		
+		// Google DNS
+		"dns.google":                        "8.8.8.8",
+		"https://dns.google/dns-query":      "https://8.8.8.8/dns-query",
+		"8.8.8.8":                           "8.8.8.8",
+		"https://8.8.8.8/dns-query":         "https://8.8.8.8/dns-query",
+		
+		// Quad9 DNS
+		"dns.quad9.net":                     "9.9.9.9",
+		"https://dns.quad9.net/dns-query":   "https://9.9.9.9/dns-query",
+	}
+
+	if resolved, ok := knownServers[address]; ok {
+		log.Printf("[Bootstrap] Resolved %s -> %s", address, resolved)
+		return resolved
+	}
+
+	// If not in known list, return as-is (assume it's already an IP)
+	return address
 }
 
 // LookupIP resolves domain to IP addresses with multi-transport fallback

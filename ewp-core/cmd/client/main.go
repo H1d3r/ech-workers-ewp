@@ -111,7 +111,8 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			echDomain = "cloudflare-ech.com"
 		}
 		if dohServer == "" {
-			dohServer = "dns.alidns.com/dns-query"
+			// Use IP address to avoid DNS dependency (Alibaba Cloud DNS)
+			dohServer = "https://223.5.5.5/dns-query"
 		}
 
 		log.Printf("[ECH] Initializing (domain: %s, DoH: %s)", echDomain, dohServer)
@@ -273,7 +274,8 @@ func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg
 	log.Printf("[启动] Starting %s proxy on %s", inbound.Type, listenAddr)
 
 	// Determine DNS server for protocol module
-	dnsServer := "dns.alidns.com/dns-query"
+	// Use IP address to avoid DNS dependency (Alibaba Cloud DNS)
+	dnsServer := "https://223.5.5.5/dns-query"
 	if cfg.DNS != nil && cfg.DNS.Final != "" {
 		for _, server := range cfg.DNS.Servers {
 			if server.Tag == cfg.DNS.Final {
