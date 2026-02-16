@@ -20,6 +20,8 @@ set(SOURCES
     src/NodeTester.cpp
     src/ShareLink.cpp
     src/EditNodeDialog.cpp
+    src/ConfigGenerator.cpp
+    src/SettingsDialog.cpp
 )
 
 set(HEADERS
@@ -31,6 +33,8 @@ set(HEADERS
     src/ShareLink.h
     src/EWPNode.h
     src/EditNodeDialog.h
+    src/ConfigGenerator.h
+    src/SettingsDialog.h
 )
 
 set(UI_FILES

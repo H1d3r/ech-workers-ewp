@@ -19,15 +19,17 @@ struct EWPNode {
     // Trojan 配置
     QString trojanPassword;    // Trojan 密码
     
-    // 传输协议: 0=WebSocket, 1=gRPC, 2=XHTTP
-    enum TransportMode { WS = 0, GRPC = 1, XHTTP = 2 };
+    // 传输协议: 0=WebSocket, 1=gRPC, 2=XHTTP, 3=H3gRPC
+    enum TransportMode { WS = 0, GRPC = 1, XHTTP = 2, H3GRPC = 3 };
     TransportMode transportMode = WS;
     
     // WebSocket 配置
     QString wsPath = "/";              // WebSocket 路径
     
-    // gRPC 配置
-    QString grpcServiceName = "ProxyService";  // gRPC 服务名（与服务端 GRPC_SERVICE 环境变量对应）
+    // gRPC / H3gRPC 配置
+    QString grpcServiceName = "api";   // gRPC 服务名
+    QString userAgent;                 // 自定义 User-Agent (anti-DPI)
+    QString contentType;               // 自定义 Content-Type (anti-DPI)
     
     // ECH 配置
     bool enableECH = true;
@@ -59,6 +61,8 @@ struct EWPNode {
         obj["transportMode"] = static_cast<int>(transportMode);
         obj["wsPath"] = wsPath;
         obj["grpcServiceName"] = grpcServiceName;
+        obj["userAgent"] = userAgent;
+        obj["contentType"] = contentType;
         obj["enableECH"] = enableECH;
         obj["echDomain"] = echDomain;
         obj["dnsServer"] = dnsServer;
@@ -81,7 +85,9 @@ struct EWPNode {
         node.trojanPassword = obj["trojanPassword"].toString();
         node.transportMode = static_cast<TransportMode>(obj["transportMode"].toInt(0));
         node.wsPath = obj["wsPath"].toString("/");
-        node.grpcServiceName = obj["grpcServiceName"].toString("ProxyService");
+        node.grpcServiceName = obj["grpcServiceName"].toString("api");
+        node.userAgent = obj["userAgent"].toString();
+        node.contentType = obj["contentType"].toString();
         node.enableECH = obj["enableECH"].toBool(true);
         node.echDomain = obj["echDomain"].toString("cloudflare-ech.com");
         node.dnsServer = obj["dnsServer"].toString("dns.alidns.com/dns-query");
@@ -98,6 +104,7 @@ struct EWPNode {
             case WS: return prefix + "-WS";
             case GRPC: return prefix + "-gRPC";
             case XHTTP: return prefix + "-XHTTP";
+            case H3GRPC: return prefix + "-H3";
             default: return prefix;
         }
     }

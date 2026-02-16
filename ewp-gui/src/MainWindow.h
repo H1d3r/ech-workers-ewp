@@ -44,6 +44,8 @@ private slots:
     void onSystemProxyToggled(bool checked);
     void onTunModeToggled(bool checked);
     
+    void onShowSettings();
+    
     void updateNodeList();
     void updateStatusBar();
     void appendLog(const QString &message);
@@ -58,6 +60,7 @@ private:
     void setupConnections();
     void setupSystemTray();
     void setupNodeTable();
+    void setupMenu();
     void loadSettings();
     void saveSettings();
     

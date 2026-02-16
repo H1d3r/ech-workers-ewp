@@ -90,6 +90,11 @@ const nginxHTML = `<!DOCTYPE html><html><head><title>Welcome to nginx!</title></
 
 
 func main() {
+	// 检查是否使用配置文件
+	var configFile string
+	flag.StringVar(&configFile, "c", "", "配置文件路径 (JSON 格式)")
+	flag.StringVar(&configFile, "config", "", "配置文件路径 (JSON 格式)")
+	
 	// 解析命令行参数
 	flag.BoolVar(&grpcMode, "grpc", false, "启用 gRPC 模式")
 	flag.BoolVar(&xhttpMode, "xhttp", false, "启用 XHTTP 模式")
@@ -99,6 +104,12 @@ func main() {
 	flag.StringVar(&password, "password", password, "Trojan 密码")
 	flag.StringVar(&fallbackAddr, "fallback", fallbackAddr, "Trojan 回退地址（如 127.0.0.1:80）")
 	flag.Parse()
+
+	// 如果提供了配置文件，使用配置文件模式
+	if configFile != "" {
+		startFromConfig(configFile)
+		return
+	}
 
 	// 也支持环境变量 MODE=grpc/xhttp, ENABLE_FLOW=true/false, PROTOCOL=trojan
 	mode := os.Getenv("MODE")
@@ -1002,3 +1013,4 @@ func (h *TrojanFallbackHandler) sendNginxResponse(conn net.Conn) {
 		nginxHTML
 	conn.Write([]byte(response))
 }
+ 

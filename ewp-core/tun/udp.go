@@ -2,6 +2,7 @@
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 
@@ -18,18 +19,39 @@ import (
 )
 
 type UDPHandler struct {
-	stack      *stack.Stack
-	transport  transport.Transport
-	dnsClient  *dns.Client
-	handler    *UDPConnectionHandler
-	writeUDPFn func(src, dst *net.UDPAddr, payload []byte)
+	stack           *stack.Stack
+	transport       transport.Transport
+	tunnelDNSResolver *dns.TunnelDNSResolver
+	handler         *UDPConnectionHandler
+	writeUDPFn      func(src, dst *net.UDPAddr, payload []byte)
 }
 
 func NewUDPHandler(st *stack.Stack, trans transport.Transport, dnsServer string) *UDPHandler {
+	// Create TunnelDNSResolver with multi-protocol support (DoQ → DoH → DoT)
+	// If dnsServer is provided, use it; otherwise use Google DNS
+	var dnsConfig dns.TunnelDNSConfig
+	if dnsServer != "" {
+		// User-specified DNS server (assume DoH)
+		dnsConfig.Servers = []dns.TunnelServerConfig{
+			{Address: dnsServer, Type: "doh"},
+		}
+	}
+	// Otherwise, use default config (DoQ → DoH → DoT with Google DNS)
+	
+	resolver, err := dns.NewTunnelDNSResolver(trans, dnsConfig)
+	if err != nil {
+		log.Printf("[UDP] Failed to create DNS resolver, falling back to DoH: %v", err)
+		// Fallback: create a simple resolver with just DoH
+		dnsConfig.Servers = []dns.TunnelServerConfig{
+			{Address: "https://dns.google/dns-query", Type: "doh"},
+		}
+		resolver, _ = dns.NewTunnelDNSResolver(trans, dnsConfig)
+	}
+
 	h := &UDPHandler{
-		stack:     st,
-		transport: trans,
-		dnsClient: dns.NewClient(dnsServer),
+		stack:             st,
+		transport:         trans,
+		tunnelDNSResolver: resolver,
 	}
 
 	h.writeUDPFn = h.writeUDPResponse
@@ -138,9 +160,13 @@ func (h *UDPHandler) handleLoop(ep tcpip.Endpoint, notifyCh chan struct{}, isIPv
 }
 
 func (h *UDPHandler) handleDNSQuery(ep tcpip.Endpoint, clientAddr *tcpip.FullAddress, query []byte) {
-	dnsResponse, err := h.dnsClient.QueryRaw(query)
+	log.V("[DNS] Received query, routing through proxy tunnel...")
+	
+	// Use context with timeout
+	ctx := context.Background()
+	dnsResponse, err := h.tunnelDNSResolver.QueryRaw(ctx, query)
 	if err != nil {
-		log.Printf("[DNS] DoH query failed: %v", err)
+		log.Printf("[DNS] Tunnel DNS query failed: %v", err)
 		return
 	}
 

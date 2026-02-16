@@ -36,7 +36,7 @@ private slots:
     void onReadyReadStandardError();
 
 private:
-    QStringList buildArguments(const EWPNode &node, bool tunMode);
+    QString generateConfigFile(const EWPNode &node, bool tunMode);
     QString findCoreExecutable();
 
     void sendQuitRequest();
@@ -44,8 +44,9 @@ private:
     QProcess *process = nullptr;
     QNetworkAccessManager *networkManager = nullptr;
     QString coreExecutable;
-    QString listenAddr = "127.0.0.1:30000";
+    QString listenAddr = "127.0.0.1:1080";
     QString controlAddr;
     QString lastError;
+    QString configFilePath;
     bool gracefulStop = false;
 };

@@ -133,7 +133,7 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 	
 	switch config.Protocol {
 	case "ws", "websocket":
-		vm.transport = websocket.NewWithProtocol(
+		vm.transport, err = websocket.NewWithProtocol(
 			config.ServerAddr,
 			config.ServerIP,
 			config.Token,
@@ -146,7 +146,7 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			echMgr,
 		)
 	case "grpc":
-		vm.transport = grpc.NewWithProtocol(
+		vm.transport, err = grpc.NewWithProtocol(
 			config.ServerAddr,
 			config.ServerIP,
 			config.Token,
@@ -159,7 +159,7 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			echMgr,
 		)
 	case "xhttp":
-		vm.transport = xhttp.NewWithProtocol(
+		vm.transport, err = xhttp.NewWithProtocol(
 			config.ServerAddr,
 			config.ServerIP,
 			config.Token,
@@ -174,6 +174,11 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 	default:
 		cancel()
 		return fmt.Errorf("unsupported protocol: %s", config.Protocol)
+	}
+	
+	if err != nil {
+		cancel()
+		return fmt.Errorf("failed to create transport: %w", err)
 	}
 	
 	// 3. 测试连接

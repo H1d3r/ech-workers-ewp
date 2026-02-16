@@ -51,8 +51,10 @@ void EditNodeDialog::setNode(const EWPNode &node)
     // WebSocket 配置
     ui->editWsPath->setText(node.wsPath);
     
-    // gRPC 配置
+    // gRPC / H3gRPC 配置
     ui->editGrpcService->setText(node.grpcServiceName);
+    ui->editUserAgent->setText(node.userAgent);
+    ui->editContentType->setText(node.contentType);
     
     // ECH 配置
     ui->checkEnableECH->setChecked(node.enableECH);
@@ -97,9 +99,11 @@ EWPNode EditNodeDialog::getNode() const
     node.wsPath = ui->editWsPath->text().trimmed();
     if (node.wsPath.isEmpty()) node.wsPath = "/";
     
-    // gRPC 配置
+    // gRPC / H3gRPC 配置
     node.grpcServiceName = ui->editGrpcService->text().trimmed();
-    if (node.grpcServiceName.isEmpty()) node.grpcServiceName = "ProxyService";
+    if (node.grpcServiceName.isEmpty()) node.grpcServiceName = "api";
+    node.userAgent = ui->editUserAgent->text().trimmed();
+    node.contentType = ui->editContentType->text().trimmed();
     
     // ECH 配置
     node.enableECH = ui->checkEnableECH->isChecked();
@@ -163,8 +167,8 @@ void EditNodeDialog::updateVisibility()
     // WebSocket 配置组
     ui->wsGroup->setVisible(mode == EWPNode::WS);
     
-    // gRPC 配置组
-    ui->grpcGroup->setVisible(mode == EWPNode::GRPC);
+    // gRPC / H3gRPC 配置组
+    ui->grpcGroup->setVisible(mode == EWPNode::GRPC || mode == EWPNode::H3GRPC);
     
     // XHTTP 配置组
     ui->xhttpGroup->setVisible(mode == EWPNode::XHTTP);

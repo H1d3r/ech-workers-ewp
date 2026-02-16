@@ -2,87 +2,37 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"ewp-core/common/tls"
-	"ewp-core/constant"
 	"ewp-core/log"
 	"ewp-core/option"
 	"ewp-core/protocol"
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
+	"ewp-core/transport/h3grpc"
 	"ewp-core/transport/websocket"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
 )
 
 func main() {
-	// Parse configuration
-	cfg, err := option.ParseFlags()
+	// Load configuration (will parse flags internally)
+	cfg, err := option.LoadConfigWithFallback()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Usage: %s -c config.json\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	// Setup logging
 	setupLogging(cfg)
 
-	log.Printf("[启动] ECH Workers Client")
-	log.Printf("[配置] Listen: %s, Server: %s", cfg.ListenAddr, cfg.ServerAddr)
-	log.Printf("[配置] Mode: %s, Protocol: %s, Flow: %v, PQC: %v", cfg.ProtoMode, cfg.AppProtocol, cfg.EnableFlow, cfg.EnablePQC)
-
-	// Determine if using Trojan protocol
-	useTrojan := cfg.AppProtocol == "trojan"
-	if useTrojan {
-		if cfg.Password == "" {
-			cfg.Password = cfg.Token // Use token as password if not specified
-		}
-		log.Printf("[协议] Using Trojan protocol")
-	} else {
-		log.Printf("[协议] Using EWP protocol")
-	}
-
-	// Initialize ECH manager if not in fallback mode
-	var echMgr *tls.ECHManager
-	if !cfg.Fallback {
-		log.Printf("[ECH] Initializing ECH configuration...")
-		echMgr = tls.NewECHManager(cfg.ECHDomain, cfg.DNSServer)
-		if err := echMgr.Refresh(); err != nil {
-			log.Fatalf("[ECH] Failed to initialize: %v\nTip: Use -fallback to disable ECH", err)
-		}
-	} else {
-		log.Printf("[启动] Fallback mode enabled (plain TLS)")
-	}
-
-	// Create transport based on protocol mode
-	var trans transport.Transport
-	switch cfg.ProtoMode {
-	case constant.TransportWebSocket:
-		parsed, err := transport.ParseAddress(cfg.ServerAddr)
-		if err != nil {
-			log.Fatalf("[错误] Invalid server address: %v", err)
-		}
-		trans = websocket.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, cfg.EnablePQC, useTrojan, parsed.Path, echMgr)
-		log.Printf("[传输] Using %s", trans.Name())
-	case constant.TransportGRPC:
-		parsed, err := transport.ParseAddress(cfg.ServerAddr)
-		if err != nil {
-			log.Fatalf("[错误] Invalid server address: %v", err)
-		}
-		trans = grpc.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, cfg.EnablePQC, useTrojan, parsed.Path, echMgr)
-		log.Printf("[传输] Using %s, service: %s", trans.Name(), parsed.Path)
-	case constant.TransportXHTTP:
-		parsed, err := transport.ParseAddress(cfg.ServerAddr)
-		if err != nil {
-			log.Fatalf("[错误] Invalid server address: %v", err)
-		}
-		trans = xhttp.NewWithProtocol(cfg.ServerAddr, cfg.ServerIP, cfg.Token, cfg.Password, !cfg.Fallback, cfg.EnableFlow, cfg.EnablePQC, useTrojan, parsed.Path, echMgr)
-		log.Printf("[传输] Using %s", trans.Name())
-	default:
-		log.Fatalf("[错误] Unknown transport mode: %s", cfg.ProtoMode)
-	}
+	log.Printf("[启动] EWP-Core Client")
+	log.Printf("[配置] Inbounds: %d, Outbounds: %d", len(cfg.Inbounds), len(cfg.Outbounds))
 
 	// Setup signal handler
 	sigChan := make(chan os.Signal, 1)
@@ -90,46 +40,262 @@ func main() {
 
 	go func() {
 		<-sigChan
-		log.Printf("[信号] Received exit signal")
-		// TODO: Cleanup resources
+		log.Printf("[信号] Received exit signal, shutting down...")
 		os.Exit(0)
 	}()
 
-	// Start proxy server or TUN mode
-	if cfg.TunMode {
-		log.Printf("[启动] Starting TUN mode...")
-		if !tun.IsAdmin() {
-			log.Fatalf("[错误] TUN mode requires administrator privileges")
-		}
+	// Get the first outbound (primary proxy)
+	if len(cfg.Outbounds) == 0 {
+		log.Fatalf("[错误] No outbound configured")
+	}
 
-		tunCfg := &tun.Config{
-			IP:        cfg.TunIP,
-			Gateway:   cfg.TunGateway,
-			Mask:      cfg.TunMask,
-			DNS:       cfg.TunDNS,
-			MTU:       cfg.TunMTU,
-			Transport: trans,
-		}
+	outbound := cfg.Outbounds[0]
+	log.Printf("[出站] Tag: %s, Type: %s, Server: %s:%d", 
+		outbound.Tag, outbound.Type, outbound.Server, outbound.ServerPort)
 
-		tunDev, err := tun.New(tunCfg)
-		if err != nil {
-			log.Fatalf("[错误] TUN initialization failed: %v", err)
-		}
-		defer tunDev.Close()
+	// Create transport
+	trans, err := createTransport(outbound, cfg)
+	if err != nil {
+		log.Fatalf("[错误] Failed to create transport: %v", err)
+	}
 
-		log.Fatalf("[错误] TUN mode stopped: %v", tunDev.Start())
-	} else {
-		// Start SOCKS5/HTTP proxy server
-		server := protocol.NewServer(cfg.ListenAddr, trans, cfg.DNSServer)
-		log.Fatalf("[错误] Proxy server stopped: %v", server.Run())
+	// Determine inbound type
+	if len(cfg.Inbounds) == 0 {
+		log.Fatalf("[错误] No inbound configured")
+	}
+
+	inbound := cfg.Inbounds[0]
+	log.Printf("[入站] Tag: %s, Type: %s", inbound.Tag, inbound.Type)
+
+	// Start based on inbound type
+	switch inbound.Type {
+	case "tun":
+		startTunMode(inbound, trans, cfg)
+	case "mixed", "socks", "http":
+		startProxyMode(inbound, trans, cfg)
+	default:
+		log.Fatalf("[错误] Unsupported inbound type: %s", inbound.Type)
 	}
 }
 
-func setupLogging(cfg *option.Config) {
-	log.SetVerbose(cfg.Verbose)
+func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (transport.Transport, error) {
+	// Validate outbound
+	if outbound.Type != "ewp" && outbound.Type != "trojan" {
+		return nil, fmt.Errorf("unsupported outbound type: %s", outbound.Type)
+	}
 
-	if cfg.LogFilePath != "" {
-		f, err := os.OpenFile(cfg.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// Determine server address
+	serverAddr := net.JoinHostPort(outbound.Server, fmt.Sprint(outbound.ServerPort))
+	
+	// Determine authentication
+	var uuid, password string
+	useTrojan := outbound.Type == "trojan"
+	
+	if useTrojan {
+		password = outbound.Password
+		log.Printf("[协议] Using Trojan protocol")
+	} else {
+		uuid = outbound.UUID
+		log.Printf("[协议] Using EWP protocol (UUID: %s)", uuid)
+	}
+
+	// Initialize ECH manager
+	var echMgr *tls.ECHManager
+	useECH := outbound.TLS != nil && outbound.TLS.ECH != nil && outbound.TLS.ECH.Enabled
+	
+	if useECH {
+		echDomain := outbound.TLS.ECH.ConfigDomain
+		dohServer := outbound.TLS.ECH.DOHServer
+		
+		if echDomain == "" {
+			echDomain = "cloudflare-ech.com"
+		}
+		if dohServer == "" {
+			dohServer = "dns.alidns.com/dns-query"
+		}
+
+		log.Printf("[ECH] Initializing (domain: %s, DoH: %s)", echDomain, dohServer)
+		echMgr = tls.NewECHManager(echDomain, dohServer)
+		
+		if err := echMgr.Refresh(); err != nil {
+			if outbound.TLS.ECH.FallbackOnError {
+				log.Printf("[警告] ECH initialization failed, falling back to plain TLS: %v", err)
+				useECH = false
+				echMgr = nil
+			} else {
+				return nil, fmt.Errorf("ECH initialization failed: %w", err)
+			}
+		}
+	}
+
+	// Get transport config
+	if outbound.Transport == nil {
+		return nil, fmt.Errorf("transport configuration is required")
+	}
+
+	transportType := outbound.Transport.Type
+	enableFlow := outbound.Flow != nil && outbound.Flow.Enabled
+	enablePQC := outbound.TLS != nil && outbound.TLS.PQC
+
+	log.Printf("[传输] Type: %s, Flow: %v, ECH: %v, PQC: %v", 
+		transportType, enableFlow, useECH, enablePQC)
+
+	// Create transport based on type
+	var trans transport.Transport
+	var err error
+
+	switch transportType {
+	case "ws":
+		path := outbound.Transport.Path
+		if path == "" {
+			path = "/"
+		}
+		trans, err = websocket.NewWithProtocol(
+			serverAddr, outbound.ServerIP, uuid, password,
+			useECH, enableFlow, enablePQC, useTrojan,
+			path, echMgr,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+	case "grpc":
+		serviceName := outbound.Transport.ServiceName
+		if serviceName == "" {
+			serviceName = "ProxyService"
+		}
+		grpcTrans, err := grpc.NewWithProtocol(
+			serverAddr, outbound.ServerIP, uuid, password,
+			useECH, enableFlow, enablePQC, useTrojan,
+			serviceName, echMgr,
+		)
+		if err != nil {
+			return nil, err
+		}
+		
+		// Apply anti-DPI settings from config
+		if outbound.Transport.UserAgent != "" {
+			grpcTrans.SetUserAgent(outbound.Transport.UserAgent)
+		}
+		if outbound.Transport.ContentType != "" {
+			grpcTrans.SetContentType(outbound.Transport.ContentType)
+		}
+		trans = grpcTrans
+
+	case "h3grpc":
+		serviceName := outbound.Transport.ServiceName
+		if serviceName == "" {
+			serviceName = "ProxyService"
+		}
+		h3Trans, err := h3grpc.NewWithProtocol(
+			serverAddr, outbound.ServerIP, uuid, password,
+			useECH, enableFlow, enablePQC, useTrojan,
+			serviceName, echMgr,
+		)
+		if err != nil {
+			return nil, err
+		}
+		
+		// Apply anti-DPI settings from config
+		if outbound.Transport.UserAgent != "" {
+			h3Trans.SetUserAgent(outbound.Transport.UserAgent)
+		}
+		if outbound.Transport.ContentType != "" {
+			h3Trans.SetContentType(outbound.Transport.ContentType)
+		}
+		trans = h3Trans
+
+	case "xhttp":
+		path := outbound.Transport.Path
+		if path == "" {
+			path = "/xhttp"
+		}
+		trans, err = xhttp.NewWithProtocol(
+			serverAddr, outbound.ServerIP, uuid, password,
+			useECH, enableFlow, enablePQC, useTrojan,
+			path, echMgr,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
+	}
+
+	log.Printf("[传输] Created: %s", trans.Name())
+	return trans, nil
+}
+
+func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *option.RootConfig) {
+	log.Printf("[启动] Starting TUN mode...")
+
+	if !tun.IsAdmin() {
+		log.Fatalf("[错误] TUN mode requires administrator privileges")
+	}
+
+	// Parse TUN address
+	tunIP := inbound.Inet4Address
+	if tunIP == "" {
+		tunIP = "10.0.85.2/24"
+	}
+
+	mtu := inbound.MTU
+	if mtu == 0 {
+		mtu = 1380
+	}
+
+	tunCfg := &tun.Config{
+		IP:        tunIP,       // Will be parsed by TUN module
+		Gateway:   "10.0.85.1", // Default gateway
+		Mask:      "255.255.255.0",
+		DNS:       "1.1.1.1",
+		MTU:       mtu,
+		Transport: trans,
+	}
+
+	tunDev, err := tun.New(tunCfg)
+	if err != nil {
+		log.Fatalf("[错误] TUN initialization failed: %v", err)
+	}
+	defer tunDev.Close()
+
+	log.Printf("[TUN] Started (IP: %s, MTU: %d)", tunIP, mtu)
+	log.Fatalf("[错误] TUN mode stopped: %v", tunDev.Start())
+}
+
+func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg *option.RootConfig) {
+	listenAddr := inbound.Listen
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:1080"
+	}
+
+	log.Printf("[启动] Starting %s proxy on %s", inbound.Type, listenAddr)
+
+	// Determine DNS server for protocol module
+	dnsServer := "dns.alidns.com/dns-query"
+	if cfg.DNS != nil && cfg.DNS.Final != "" {
+		for _, server := range cfg.DNS.Servers {
+			if server.Tag == cfg.DNS.Final {
+				dnsServer = server.Address
+				break
+			}
+		}
+	}
+
+	// Create and run proxy server
+	server := protocol.NewServer(listenAddr, trans, dnsServer)
+	log.Fatalf("[错误] Proxy server stopped: %v", server.Run())
+}
+
+func setupLogging(cfg *option.RootConfig) {
+	// Set log level
+	verbose := cfg.Log.Level == "debug"
+	log.SetVerbose(verbose)
+
+	// Set log file if specified
+	if cfg.Log.File != "" {
+		f, err := os.OpenFile(cfg.Log.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to open log file: %v\n", err)
 			os.Exit(1)
