@@ -249,22 +249,34 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	
 	// If no serverIP specified, resolve using bootstrap resolver (DoH over H2)
 	if resolvedIP == "" && !isIPAddress(host) {
+		log.Printf("[H3] Resolving server address: %s", host)
+		
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		
 		ips, err := t.bootstrapResolver.LookupIP(ctx, host)
 		if err != nil {
+			log.Printf("[H3] Bootstrap DNS resolution failed for %s: %v", host, err)
 			return nil, fmt.Errorf("bootstrap DNS resolution failed: %w", err)
 		}
 		if len(ips) > 0 {
 			resolvedIP = ips[0].String()
-			log.V("[H3] Bootstrap resolved %s -> %s", host, resolvedIP)
+			log.Printf("[H3] Bootstrap resolved %s -> %s", host, resolvedIP)
+		} else {
+			log.Printf("[H3] No IPs returned for %s", host)
 		}
+	} else if isIPAddress(host) {
+		log.Printf("[H3] Server address is already an IP: %s", host)
+	} else {
+		log.Printf("[H3] Using pre-configured server IP: %s", t.serverIP)
 	}
 	
 	// Use resolved IP if available
 	if resolvedIP != "" {
 		addr = net.JoinHostPort(resolvedIP, port)
+		log.Printf("[H3] Connecting to: %s (SNI: %s)", addr, host)
+	} else {
+		log.Printf("[H3] Connecting to: %s", addr)
 	}
 
 	// Build request URL

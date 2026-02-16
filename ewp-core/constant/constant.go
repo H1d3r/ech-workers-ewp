@@ -15,7 +15,7 @@ const (
 // Default values
 const (
 	DefaultListenAddr   = "127.0.0.1:30000"
-	DefaultDNSServer    = "dns.alidns.com/dns-query"
+	DefaultDNSServer    = "https://223.5.5.5/dns-query" // Alibaba Cloud DNS (IP to avoid DNS dependency)
 	DefaultECHDomain    = "cloudflare-ech.com"
 	DefaultNumConns     = 1
 	DefaultXHTTPMode    = "auto"
