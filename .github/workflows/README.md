@@ -97,13 +97,20 @@ This directory contains automated build and release workflows for the EWP-Worker
 
 ## Version Tagging Convention
 
-Follow semantic versioning:
-- **Release**: `v1.0.0`, `v2.3.1`
-- **Pre-release**: `v1.0.0-beta`, `v2.0.0-rc1`, `v1.5.0-alpha`
+支持灵活的版本号格式：
+
+**标准版本:**
+- 两段: `v1.0`, `v2.13`, `v3.5`
+- 三段: `v1.0.0`, `v2.3.1`, `v1.13.5`
+
+**预发布版本:**
+- `v1.0-beta`, `v1.13-rc1`
+- `v1.0.0-alpha`, `v2.0.0-beta.2`
 
 **Valid formats:**
-- `v[MAJOR].[MINOR].[PATCH]`
-- `v[MAJOR].[MINOR].[PATCH]-[PRERELEASE]`
+- `v[MAJOR].[MINOR]` (两段)
+- `v[MAJOR].[MINOR].[PATCH]` (三段，推荐)
+- `v[VERSION]-[PRERELEASE]` (预发布标识可包含字母、数字、点)
 
 ---
 
@@ -133,8 +140,19 @@ with:
 ```
 Error: Invalid version format
 ```
-- Ensure version starts with `v`
-- Follow format: `v1.0.0` or `v1.0.0-beta`
+- 必须以 `v` 开头
+- 至少包含两段数字: `v1.0` 或 `v1.0.0`
+- 预发布标识用 `-` 分隔: `v1.0-beta`
+
+**Valid examples:**
+- ✅ `v1.13`, `v1.0`, `v2.5`
+- ✅ `v1.0.0`, `v2.3.1`
+- ✅ `v1.13-beta`, `v2.0.0-rc.1`
+
+**Invalid examples:**
+- ❌ `1.0` (缺少 `v` 前缀)
+- ❌ `v1` (只有一段)
+- ❌ `v1.0.0.0` (超过三段)
 
 **Permission denied:**
 ```
