@@ -83,9 +83,21 @@ This directory contains automated build and release workflows for the EWP-Worker
 ### GitHub Repository Settings
 
 1. **Secrets**: No additional secrets required (uses built-in `GITHUB_TOKEN`)
-2. **Permissions**: Workflows need write permissions for:
-   - Contents (to create releases)
-   - Actions (to upload artifacts)
+
+2. **Permissions**: Workflows need write permissions:
+   - Go to **Settings** → **Actions** → **General**
+   - Scroll to **Workflow permissions**
+   - Select **Read and write permissions** ✅
+   - Check **Allow GitHub Actions to create and approve pull requests** (optional)
+   - Click **Save**
+
+3. **Alternative**: If you want to keep read-only default:
+   - Permissions are already set in workflow file:
+     ```yaml
+     permissions:
+       contents: write  # Create releases and tags
+       actions: read    # Read artifacts
+     ```
 
 ### Build Dependencies
 
@@ -154,12 +166,22 @@ Error: Invalid version format
 - ❌ `v1` (只有一段)
 - ❌ `v1.0.0.0` (超过三段)
 
-**Permission denied:**
+**Permission denied (403 / Resource not accessible):**
 ```
-Error: Resource not accessible by integration
+remote: Permission to user/repo.git denied to github-actions[bot].
+fatal: unable to access '...': The requested URL returned error: 403
 ```
-- Check repository settings → Actions → General
-- Enable **Read and write permissions**
+
+**Solution 1: Enable write permissions (推荐)**
+1. Go to repository **Settings** → **Actions** → **General**
+2. Scroll to **Workflow permissions**
+3. Select **Read and write permissions**
+4. Click **Save**
+
+**Solution 2: Workflow already has permissions**
+- `release.yml` 已包含 `permissions: contents: write`
+- 如果还报错，说明仓库级别禁用了写权限
+- 需要在 Settings 中启用
 
 ---
 
