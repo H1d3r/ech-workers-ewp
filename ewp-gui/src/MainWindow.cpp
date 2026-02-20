@@ -70,6 +70,19 @@ void MainWindow::setupConnections()
     
     connect(coreProcess, &CoreProcess::logReceived, this, &MainWindow::appendLog);
     
+    connect(coreProcess, &CoreProcess::reconnecting, this, [this](int attempt, int maxAttempts) {
+        ui->labelStatus->setText(QString("重连中... (%1/%2)").arg(attempt).arg(maxAttempts));
+    });
+    
+    connect(coreProcess, &CoreProcess::reconnectFailed, this, [this]() {
+        appendLog("❌ 自动重连失败，已达最大重试次数");
+        QMessageBox::warning(this, "重连失败", 
+            QString("核心进程已崩溃，自动重连 %1 次均失败，请检查节点配置后手动重启。")
+                .arg(CoreProcess::kMaxRetries));
+        updateStatusBar();
+        updateNodeList();
+    });
+    
     // 节点表格双击
     connect(ui->nodeTable, &QTableWidget::cellDoubleClicked, 
             this, &MainWindow::onNodeDoubleClicked);
@@ -429,14 +442,13 @@ void MainWindow::onNodeDoubleClicked(int row, int column)
         return;
     }
     
-    // 如果正在运行其他节点，先停止再切换
+    // 如果正在运行其他节点，先停止再切换（isRunning 由 stopped 信号更新）
     if (isRunning) {
         appendLog("🔄 切换节点...");
         coreProcess->stop();
         if (ui->checkSystemProxy->isChecked()) {
             systemProxy->disable();
         }
-        isRunning = false;
     }
     
     // 启动新节点

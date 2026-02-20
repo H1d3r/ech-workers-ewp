@@ -48,13 +48,13 @@ func (h *Handler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 		return
 	}
 	defer tunnelConn.Close()
+	defer conn.Close()
 
 	stopPing := tunnelConn.StartPing(10 * time.Second)
 	defer close(stopPing)
 
 	if err := tunnelConn.Connect(target, nil); err != nil {
 		log.Printf("[TUN TCP] CONNECT failed: %v", err)
-		conn.Close()
 		return
 	}
 
@@ -121,13 +121,13 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		return
 	}
 	defer tunnelConn.Close()
+	defer conn.Close()
 
 	stopPing := tunnelConn.StartPing(10 * time.Second)
 	defer close(stopPing)
 
 	if err := tunnelConn.ConnectUDP(target, nil); err != nil {
 		log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
-		conn.Close()
 		return
 	}
 
@@ -152,7 +152,8 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 			
 			if err := tunnelConn.WriteUDP(udpTarget, packet); err != nil {
 				log.V("[TUN UDP] Packet send failed: %v", err)
-				continue
+				done <- true
+				return
 			}
 		}
 	}()
@@ -171,7 +172,8 @@ func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 			if err := conn.WritePacket(buffer, destination); err != nil {
 				buffer.Release()
 				log.V("[TUN UDP] Response write failed: %v", err)
-				continue
+				done <- true
+				return
 			}
 		}
 	}()

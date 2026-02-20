@@ -10,12 +10,16 @@
 #include <QStandardPaths>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QFile>
 
 CoreProcess::CoreProcess(QObject *parent)
     : QObject(parent)
 {
     coreExecutable = findCoreExecutable();
     networkManager = new QNetworkAccessManager(this);
+    retryTimer = new QTimer(this);
+    retryTimer->setSingleShot(true);
+    connect(retryTimer, &QTimer::timeout, this, &CoreProcess::attemptReconnect);
 }
 
 CoreProcess::~CoreProcess()
@@ -57,6 +61,13 @@ QString CoreProcess::findCoreExecutable()
 
 bool CoreProcess::start(const EWPNode &node, bool tunMode)
 {
+    retryCount = 0;
+    retryTimer->stop();
+    return startCore(node, tunMode);
+}
+
+bool CoreProcess::startCore(const EWPNode &node, bool tunMode)
+{
     if (isRunning()) {
         lastError = "进程已在运行";
         return false;
@@ -73,6 +84,9 @@ bool CoreProcess::start(const EWPNode &node, bool tunMode)
         emit errorOccurred(lastError);
         return false;
     }
+    
+    lastNode = node;
+    lastTunMode = tunMode;
     
     configFilePath = generateConfigFile(node, tunMode);
     if (configFilePath.isEmpty()) {
@@ -112,6 +126,11 @@ bool CoreProcess::start(const EWPNode &node, bool tunMode)
 
 void CoreProcess::stop()
 {
+    if (!isRunning() && !retryTimer->isActive()) return;
+    
+    retryCount = 0;
+    retryTimer->stop();
+    
     if (!isRunning()) return;
     
     gracefulStop = true;
@@ -174,7 +193,7 @@ QString CoreProcess::generateConfigFile(const EWPNode &node, bool tunMode)
     QJsonObject config = ConfigGenerator::generateClientConfig(node, settings, tunMode);
     
     QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
-    QString configPath = tempDir + "/ewp-gui-config.json";
+    QString configPath = tempDir + QString("/ewp-gui-config-%1.json").arg(QCoreApplication::applicationPid());
     
     if (!ConfigGenerator::saveConfig(config, configPath)) {
         qWarning() << "Failed to save config to:" << configPath;
@@ -194,14 +213,42 @@ void CoreProcess::onProcessFinished(int exitCode, QProcess::ExitStatus exitStatu
 {
     Q_UNUSED(exitCode)
     
-    // 如果是优雅退出，不报告崩溃
-    if (exitStatus == QProcess::CrashExit && !gracefulStop) {
-        emit errorOccurred("核心进程崩溃");
-    }
+    bool crashed = (exitStatus == QProcess::CrashExit && !gracefulStop);
     
     gracefulStop = false;
     controlAddr.clear();
     emit stopped();
+    
+    if (crashed) {
+        scheduleReconnect();
+    }
+}
+
+void CoreProcess::scheduleReconnect()
+{
+    if (retryCount >= kMaxRetries) {
+        emit reconnectFailed();
+        retryCount = 0;
+        return;
+    }
+    
+    int delaySec = 2 << retryCount;
+    retryCount++;
+    
+    emit reconnecting(retryCount, kMaxRetries);
+    emit logReceived(QString("⚠️ 核心进程崩溃，%1 秒后尝试第 %2/%3 次重连...")
+                         .arg(delaySec).arg(retryCount).arg(kMaxRetries));
+    
+    retryTimer->start(delaySec * 1000);
+}
+
+void CoreProcess::attemptReconnect()
+{
+    emit logReceived(QString("🔄 正在尝试重连 (%1/%2)...").arg(retryCount).arg(kMaxRetries));
+    
+    if (!startCore(lastNode, lastTunMode)) {
+        scheduleReconnect();
+    }
 }
 
 void CoreProcess::onProcessError(QProcess::ProcessError error)

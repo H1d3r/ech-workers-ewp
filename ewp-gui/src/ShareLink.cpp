@@ -91,7 +91,7 @@ EWPNode ShareLink::parseLink(const QString &link)
     node.serverIP = query.queryItemValue("ip");
     
     // ECH 配置
-    node.enableECH = query.queryItemValue("ech") != "0";
+    node.enableECH = query.queryItemValue("ech") == "1";
     QString echDomain = query.queryItemValue("echDomain");
     if (!echDomain.isEmpty()) {
         node.echDomain = echDomain;
