@@ -127,21 +127,23 @@ func createUnifiedHandler(cfg *option.ServerConfig) http.Handler {
 			log.Info("WebSocket handler registered (path: %s)", wsPath)
 
 		case "grpc":
-			grpcServer := createGRPCServer(cfg)
-
-			var handler http.Handler = grpcServer
-			if cfg.Advanced.EnableGRPCWeb {
-				handler = server.NewGRPCWebAdapter(grpcServer)
-				log.Info("gRPC-Web adapter enabled")
-			}
-
 			serviceName := cfg.Listener.GRPCService
 			if serviceName == "" {
 				serviceName = "ProxyService"
 			}
 			grpcPath := "/" + serviceName + "/"
-			mux.Handle(grpcPath, handler)
-			log.Info("gRPC handler registered (service: %s)", serviceName)
+
+			if cfg.Advanced.EnableGRPCWeb {
+				// Use the native gRPC-Web handler that works over any HTTP version
+				// (H1, H2, H3). This is required for CDN scenarios where nginx
+				// proxies over HTTP/1.1, bypassing grpc.Server's ProtoMajor==2 check.
+				mux.Handle(grpcPath, server.NewH3GRPCWebHandler(newProtocolHandler))
+				log.Info("gRPC-Web handler registered (H1/H2/H3 compatible, service: %s)", serviceName)
+			} else {
+				// Standard gRPC mode: requires the client to connect over HTTP/2.
+				mux.Handle(grpcPath, createGRPCServer(cfg))
+				log.Info("gRPC handler registered (service: %s)", serviceName)
+			}
 
 		case "xhttp":
 			xhttpPath := cfg.Listener.XHTTPPath
