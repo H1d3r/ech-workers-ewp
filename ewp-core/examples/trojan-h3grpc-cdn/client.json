@@ -20,7 +20,8 @@
       "password": "your-strong-password-here",
       "transport": {
         "type": "h3grpc",
-        "service_name": "ProxyService"
+        "service_name": "ProxyService",
+        "content_type": "application/grpc-web+proto"
       },
       "tls": {
         "enabled": true,
