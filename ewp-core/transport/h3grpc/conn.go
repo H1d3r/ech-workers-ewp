@@ -542,10 +542,9 @@ func (c *Conn) Close() error {
 
 // StartPing starts periodic ping (not needed for HTTP/3 - has built-in keepalive)
 func (c *Conn) StartPing(interval time.Duration) chan struct{} {
-	// QUIC has built-in keepalive, no need for application-level ping
-	done := make(chan struct{})
-	close(done)
-	return done
+	// QUIC has built-in keepalive, no application-level ping goroutine needed.
+	// Return an open channel so the caller's defer close() does not panic.
+	return make(chan struct{})
 }
 
 // receiveLoop receives and processes incoming messages
