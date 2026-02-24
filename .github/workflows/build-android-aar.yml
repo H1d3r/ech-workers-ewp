@@ -64,14 +64,14 @@ jobs:
         run: gomobile init
 
       - name: Add golang.org/x/mobile dependency
-        run: |
-          go get golang.org/x/mobile@latest
-          go mod tidy
+        run: go get golang.org/x/mobile@latest
 
       - name: Download Go modules
         run: go mod download
 
       - name: Build Android AAR
+        env:
+          GOFLAGS: -mod=mod
         run: |
           mkdir -p output/android
           gomobile bind \
