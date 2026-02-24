@@ -63,6 +63,11 @@ jobs:
       - name: Initialize gomobile
         run: gomobile init
 
+      - name: Add golang.org/x/mobile dependency
+        run: |
+          go get golang.org/x/mobile@latest
+          go mod tidy
+
       - name: Download Go modules
         run: go mod download
 
