@@ -147,31 +147,25 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	addr := net.JoinHostPort(parsed.Host, parsed.Port)
 	resolvedIP := t.serverIP
 
-	// Resolve serverIP if it's a domain name using system DNS
+	// Resolve serverIP if it's a domain name
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ips, err := net.LookupIP(resolvedIP)
+		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, parsed.Port)
 		if err != nil {
-			log.Printf("[gRPC] System DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			log.Printf("[gRPC] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
 			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-			log.V("[gRPC] Resolved serverIP %s -> %s", t.serverIP, resolvedIP)
-		} else {
-			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
-		}
+		log.V("[gRPC] Resolved serverIP %s -> %s", t.serverIP, ip)
+		resolvedIP = ip
 	}
 
-	// If no serverIP specified, resolve using system DNS
+	// If no serverIP specified, resolve host (bypass DNS + optimal IP selection)
 	if resolvedIP == "" && !isIPAddress(parsed.Host) {
-		ips, err := net.LookupIP(parsed.Host)
+		ip, err := transport.ResolveIP(t.bypassCfg, parsed.Host, parsed.Port)
 		if err != nil {
-			log.Printf("[gRPC] System DNS resolution failed for %s: %v", parsed.Host, err)
+			log.Printf("[gRPC] DNS resolution failed for %s: %v", parsed.Host, err)
 			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-		}
+		resolvedIP = ip
 	}
 
 	if resolvedIP != "" {
@@ -301,10 +295,7 @@ func (t *Transport) getOrCreateConn(host, addr string) (*grpc.ClientConn, error)
 		opts = append(opts, grpc.WithUserAgent(t.userAgent))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, addr, opts...)
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("gRPC dial failed: %w", err)
 	}

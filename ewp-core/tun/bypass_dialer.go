@@ -73,11 +73,15 @@ func NewBypassDialer(serverIP string) (*BypassDialer, error) {
 }
 
 // ToBypassConfig converts to the transport.BypassConfig used by all transports.
+// A BypassResolver is automatically created so that DNS queries also bypass the TUN
+// and all resolved IPs are probed to select the optimal CDN edge node.
 func (b *BypassDialer) ToBypassConfig() *transport.BypassConfig {
-	return &transport.BypassConfig{
+	cfg := &transport.BypassConfig{
 		TCPDialer:       b.Dialer,
 		UDPListenConfig: b.ListenConfig,
 	}
+	cfg.Resolver = transport.NewBypassResolver(cfg, "")
+	return cfg
 }
 
 // ListenUDP creates a UDP PacketConn bound to the physical interface (for QUIC).

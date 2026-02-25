@@ -152,7 +152,8 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 
 	switch config.Protocol {
 	case "ws", "websocket":
-		vm.transport, err = websocket.NewWithProtocol(
+		var wsT *websocket.Transport
+		wsT, err = websocket.NewWithProtocol(
 			config.ServerAddr,
 			config.ServerIP,
 			config.Token,
@@ -164,6 +165,10 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			config.Path,
 			echMgr,
 		)
+		if err == nil && config.Host != "" {
+			wsT.SetHost(config.Host)
+		}
+		vm.transport = wsT
 	case "grpc":
 		var grpcT *grpc.Transport
 		grpcT, err = grpc.NewWithProtocol(
@@ -178,8 +183,13 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			config.Path,
 			echMgr,
 		)
-		if err == nil && config.UserAgent != "" {
-			grpcT.SetUserAgent(config.UserAgent)
+		if err == nil {
+			if config.UserAgent != "" {
+				grpcT.SetUserAgent(config.UserAgent)
+			}
+			if config.Host != "" {
+				grpcT.SetAuthority(config.Host)
+			}
 		}
 		vm.transport = grpcT
 	case "xhttp":
@@ -196,8 +206,13 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			config.Path,
 			echMgr,
 		)
-		if err == nil && config.XhttpMode != "" {
-			xhttpT.SetMode(config.XhttpMode)
+		if err == nil {
+			if config.XhttpMode != "" {
+				xhttpT.SetMode(config.XhttpMode)
+			}
+			if config.Host != "" {
+				xhttpT.SetCustomHeader("Host", config.Host)
+			}
 		}
 		vm.transport = xhttpT
 	case "h3grpc":
@@ -220,6 +235,9 @@ func (vm *VPNManager) Start(tunFD int, config *VPNConfig) error {
 			}
 			if config.ContentType != "" {
 				h3T.SetContentType(config.ContentType)
+			}
+			if config.Host != "" {
+				h3T.SetAuthority(config.Host)
 			}
 		}
 		vm.transport = h3T
