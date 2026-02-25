@@ -206,16 +206,15 @@ class EWPVpnService : VpnService(), SocketProtector {
             
             if (vpnInterface == null) {
                 Log.e(TAG, "Failed to establish VPN interface")
-                return -1
+                -1
+            } else {
+                val fd = vpnInterface!!.fd
+                Log.i(TAG, "VPN interface established: fd=$fd, proxyMode=${proxyConfig.mode}")
+                fd
             }
-            
-            val fd = vpnInterface!!.fd
-            Log.i(TAG, "VPN interface established: fd=$fd, proxyMode=${proxyConfig.mode}")
-            return fd
-            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish VPN interface", e)
-            return -1
+            -1
         }
     }
     

@@ -115,16 +115,14 @@ jobs:
         with:
           gradle-version: '8.5'
 
-      - name: Build Debug APK (all ABIs)
+      - name: Build Debug APK
         working-directory: ewp-android
-        run: |
-          gradle assembleDebug \
-            -Pandroid.injected.build.abi=arm64-v8a,armeabi-v7a,x86_64,x86
+        run: gradle assembleDebug
 
       - name: Collect APKs
         run: |
           mkdir -p apk-output
-          find ewp-android/app/build/outputs/apk/debug -name "*.apk" \
+          find ewp-android/app/build/outputs/apk -name "*.apk" \
             -exec cp {} apk-output/ \;
           ls -lh apk-output/
 
