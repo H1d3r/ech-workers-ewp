@@ -47,18 +47,16 @@ fun NodeEditScreen(
     var userAgent by remember { mutableStateOf(existingNode?.userAgent ?: "") }
     var contentType by remember { mutableStateOf(existingNode?.contentType ?: "") }
 
-    var sni by remember { mutableStateOf(existingNode?.sni ?: "") }
     var enableTLS by remember { mutableStateOf(existingNode?.enableTLS ?: true) }
+    var sni by remember { mutableStateOf(existingNode?.sni ?: "") }
     var minTLSVersion by remember { mutableStateOf(existingNode?.minTLSVersion ?: "1.2") }
 
     var enableECH by remember { mutableStateOf(existingNode?.enableECH ?: true) }
     var echDomain by remember { mutableStateOf(existingNode?.echDomain ?: "cloudflare-ech.com") }
     var dnsServer by remember { mutableStateOf(existingNode?.dnsServer ?: "dns.alidns.com/dns-query") }
 
-    var enableFlow by remember { mutableStateOf(existingNode?.enableFlow ?: true) }
     var enablePQC by remember { mutableStateOf(existingNode?.enablePQC ?: false) }
-
-    var showAdvanced by remember { mutableStateOf(false) }
+    var enableFlow by remember { mutableStateOf(existingNode?.enableFlow ?: true) }
 
     val isValid = name.isNotBlank() && serverAddress.isNotBlank() &&
             (appProtocol == EWPNode.AppProtocol.TROJAN && password.isNotBlank() ||
@@ -122,6 +120,8 @@ fun NodeEditScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+
+            // ── 基本配置 ──────────────────────────────────────────────
             SectionTitle("基本配置")
 
             OutlinedTextField(
@@ -176,7 +176,7 @@ fun NodeEditScreen(
                             value = uuid,
                             onValueChange = { uuid = it },
                             label = { Text("UUID") },
-                            placeholder = { Text("EWP 认证令牌") },
+                            placeholder = { Text("EWP 认证令牌（与服务端一致）") },
                             modifier = Modifier.weight(1f),
                             singleLine = true
                         )
@@ -197,10 +197,14 @@ fun NodeEditScreen(
                 }
             }
 
+            // ── 高级配置 (EWP) ────────────────────────────────────────
             if (appProtocol == EWPNode.AppProtocol.EWP) {
+                Divider()
+                SectionTitle("高级配置 (EWP)")
                 SwitchRow("Vision 流控", enableFlow) { enableFlow = it }
             }
 
+            // ── 传输配置 ──────────────────────────────────────────────
             Divider()
             SectionTitle("传输配置")
 
@@ -228,6 +232,15 @@ fun NodeEditScreen(
                 onValueChange = { host = it },
                 label = { Text("Host") },
                 placeholder = { Text("留空则同服务器地址（CDN 域名 / HTTP Host 头）") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            OutlinedTextField(
+                value = serverIP,
+                onValueChange = { serverIP = it },
+                label = { Text("优选 IP") },
+                placeholder = { Text("可选，绕过 DNS 直连指定 IP") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
@@ -315,12 +328,34 @@ fun NodeEditScreen(
                 }
             }
 
+            // ── TLS 配置 ──────────────────────────────────────────────
             Divider()
             SectionTitle("TLS 配置")
 
             SwitchRow("启用 TLS", enableTLS) { enableTLS = it }
 
             if (enableTLS) {
+                OutlinedTextField(
+                    value = sni,
+                    onValueChange = { sni = it },
+                    label = { Text("SNI") },
+                    placeholder = { Text("留空则同 Host（TLS 握手域名）") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                DropdownRow(
+                    label = "最低 TLS 版本",
+                    options = listOf("TLS 1.2", "TLS 1.3"),
+                    selectedIndex = if (minTLSVersion == "1.3") 1 else 0,
+                    onSelectionChange = {
+                        if (!enableECH) minTLSVersion = if (it == 1) "1.3" else "1.2"
+                    },
+                    enabled = !enableECH
+                )
+
+                SwitchRow("后量子加密 (PQC)", enablePQC) { enablePQC = it }
+
                 SwitchRow("启用 ECH", enableECH) {
                     enableECH = it
                     if (it) minTLSVersion = "1.3"
@@ -341,42 +376,6 @@ fun NodeEditScreen(
                         placeholder = { Text("dns.alidns.com/dns-query") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
-                    )
-                }
-
-                SwitchRow("后量子加密 (PQC)", enablePQC) { enablePQC = it }
-
-                TextButton(onClick = { showAdvanced = !showAdvanced }) {
-                    Text(if (showAdvanced) "隐藏高级 TLS 选项" else "显示高级 TLS 选项")
-                }
-
-                if (showAdvanced) {
-                    OutlinedTextField(
-                        value = sni,
-                        onValueChange = { sni = it },
-                        label = { Text("SNI") },
-                        placeholder = { Text("留空则同 Host（TLS 握手域名）") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-
-                    OutlinedTextField(
-                        value = serverIP,
-                        onValueChange = { serverIP = it },
-                        label = { Text("优选 IP") },
-                        placeholder = { Text("可选，绕过 DNS 直连 IP") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-
-                    DropdownRow(
-                        label = "最低 TLS 版本",
-                        options = listOf("TLS 1.2", "TLS 1.3"),
-                        selectedIndex = if (minTLSVersion == "1.3") 1 else 0,
-                        onSelectionChange = {
-                            if (!enableECH) minTLSVersion = if (it == 1) "1.3" else "1.2"
-                        },
-                        enabled = !enableECH
                     )
                 }
             }
@@ -469,7 +468,9 @@ private fun DropdownRow(
             readOnly = true,
             label = { Text(label) },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier.fillMaxWidth().menuAnchor(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(),
             enabled = enabled
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {

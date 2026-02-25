@@ -125,13 +125,11 @@ func (tf *TunnelForwarder) forwardDownlink() {
 		data := buf[:n]
 
 		if tf.enableFlow && tf.flowState != nil {
+			// PadDownlink allocates a new frame buffer; data no longer aliases buf.
 			data = tf.flowState.PadDownlink(data, &writeOnceUserUUID)
 		}
 
-		sendData := make([]byte, len(data))
-		copy(sendData, data)
-
-		if err := tf.transport.Write(sendData); err != nil {
+		if err := tf.transport.Write(data); err != nil {
 			log.V("[Forwarder] Downlink write error: %v", err)
 			return
 		}

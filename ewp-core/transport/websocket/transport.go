@@ -116,29 +116,23 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 	// Resolve serverIP if it's a domain name
 	resolvedIP := t.serverIP
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ips, err := net.LookupIP(resolvedIP)
+		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, parsed.Port)
 		if err != nil {
-			log.Printf("[WebSocket] System DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			log.Printf("[WebSocket] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
 			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-			log.V("[WebSocket] Resolved serverIP %s -> %s", t.serverIP, resolvedIP)
-		} else {
-			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
-		}
+		log.V("[WebSocket] Resolved serverIP %s -> %s", t.serverIP, ip)
+		resolvedIP = ip
 	}
 
-	// If no serverIP, resolve serverAddr using system DNS
+	// If no serverIP, resolve host (bypass DNS + optimal IP selection)
 	if resolvedIP == "" && !isIPAddress(parsed.Host) {
-		ips, err := net.LookupIP(parsed.Host)
+		ip, err := transport.ResolveIP(t.bypassCfg, parsed.Host, parsed.Port)
 		if err != nil {
-			log.Printf("[WebSocket] System DNS resolution failed for %s: %v", parsed.Host, err)
+			log.Printf("[WebSocket] DNS resolution failed for %s: %v", parsed.Host, err)
 			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-		}
+		resolvedIP = ip
 	}
 
 	// Configure dialer — use bypass dialer in TUN mode to avoid routing loops

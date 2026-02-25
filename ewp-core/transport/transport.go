@@ -46,6 +46,10 @@ type BypassConfig struct {
 	// UDPListenConfig is used by QUIC-based transports (h3grpc).
 	// ListenPacket binds the UDP socket to the physical interface.
 	UDPListenConfig *net.ListenConfig
+	// Resolver performs DNS resolution via a bypass-protected socket and
+	// probes all returned IPs to select the lowest-latency edge node.
+	// When nil, transports fall back to net.LookupIP.
+	Resolver *BypassResolver
 }
 
 // Transport is the transport layer interface

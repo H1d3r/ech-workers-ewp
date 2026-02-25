@@ -288,29 +288,23 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 
 	// Resolve serverIP if it's a domain name
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ips, err := net.LookupIP(resolvedIP)
+		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, port)
 		if err != nil {
-			log.Printf("[H3] System DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			log.Printf("[H3] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
 			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-			log.V("[H3] Resolved serverIP %s -> %s", t.serverIP, resolvedIP)
-		} else {
-			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
-		}
+		log.V("[H3] Resolved serverIP %s -> %s", t.serverIP, ip)
+		resolvedIP = ip
 	}
 
-	// If no serverIP specified, resolve using system DNS
+	// If no serverIP specified, resolve host (bypass DNS + optimal IP selection)
 	if resolvedIP == "" && !isIPAddress(host) {
-		ips, err := net.LookupIP(host)
+		ip, err := transport.ResolveIP(t.bypassCfg, host, port)
 		if err != nil {
-			log.Printf("[H3] System DNS resolution failed for %s: %v", host, err)
+			log.Printf("[H3] DNS resolution failed for %s: %v", host, err)
 			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-		}
+		resolvedIP = ip
 	}
 
 	if resolvedIP != "" {

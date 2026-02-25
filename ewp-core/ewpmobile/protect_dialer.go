@@ -14,8 +14,10 @@ func makeProtectedBypassConfig() *transport.BypassConfig {
 		})
 		return nil
 	}
-	return &transport.BypassConfig{
+	cfg := &transport.BypassConfig{
 		TCPDialer:       &net.Dialer{Control: control},
 		UDPListenConfig: &net.ListenConfig{Control: control},
 	}
+	cfg.Resolver = transport.NewBypassResolver(cfg, "")
+	return cfg
 }

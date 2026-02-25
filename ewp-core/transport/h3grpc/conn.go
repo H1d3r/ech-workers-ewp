@@ -51,6 +51,7 @@ type Conn struct {
 	cancelFn       context.CancelFunc
 	activePipeRead *io.PipeReader // active request body; closed on Close()
 	udpGlobalID    [8]byte
+	readLeftover   []byte // unread bytes from the previous recvChan pop
 
 	// Goroutine management
 	wg sync.WaitGroup
@@ -458,19 +459,35 @@ func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
 	}
 }
 
-// Read reads data from the connection
+// Read reads data from the connection.
+// Leftover bytes from a previous oversized chunk are returned first.
 func (c *Conn) Read(buf []byte) (int, error) {
 	if c.closed {
 		return 0, io.EOF
 	}
 
-	select {
-	case data := <-c.recvChan:
-		n := copy(buf, data)
-		return n, nil
-	case <-c.closeChan:
-		return 0, io.EOF
+	var data []byte
+	if len(c.readLeftover) > 0 {
+		data = c.readLeftover
+	} else {
+		select {
+		case d, ok := <-c.recvChan:
+			if !ok {
+				return 0, io.EOF
+			}
+			data = d
+		case <-c.closeChan:
+			return 0, io.EOF
+		}
 	}
+
+	n := copy(buf, data)
+	if n < len(data) {
+		c.readLeftover = data[n:]
+	} else {
+		c.readLeftover = nil
+	}
+	return n, nil
 }
 
 // Write writes data to the connection

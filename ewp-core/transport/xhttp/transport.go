@@ -302,32 +302,26 @@ func (t *Transport) createHTTPClient(host, port string) (*http.Client, error) {
 
 	stdConfig.NextProtos = []string{"h2"}
 
-	// Resolve serverIP if it's a domain name using system DNS
+	// Resolve serverIP if it's a domain name
 	resolvedIP := t.serverIP
 	if resolvedIP != "" && !isIPAddress(resolvedIP) {
-		ips, err := net.LookupIP(resolvedIP)
+		ip, err := transport.ResolveIP(t.bypassCfg, resolvedIP, port)
 		if err != nil {
-			log.Printf("[XHTTP] System DNS resolution failed for serverIP %s: %v", resolvedIP, err)
+			log.Printf("[XHTTP] DNS resolution failed for serverIP %s: %v", resolvedIP, err)
 			return nil, fmt.Errorf("DNS resolution failed for serverIP: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-			log.V("[XHTTP] Resolved serverIP %s -> %s", t.serverIP, resolvedIP)
-		} else {
-			return nil, fmt.Errorf("no IPs returned for serverIP %s", t.serverIP)
-		}
+		log.V("[XHTTP] Resolved serverIP %s -> %s", t.serverIP, ip)
+		resolvedIP = ip
 	}
 
-	// If no serverIP, resolve serverAddr using system DNS
+	// If no serverIP, resolve host (bypass DNS + optimal IP selection)
 	if resolvedIP == "" && !isIPAddress(host) {
-		ips, err := net.LookupIP(host)
+		ip, err := transport.ResolveIP(t.bypassCfg, host, port)
 		if err != nil {
-			log.Printf("[XHTTP] System DNS resolution failed for %s: %v", host, err)
+			log.Printf("[XHTTP] DNS resolution failed for %s: %v", host, err)
 			return nil, fmt.Errorf("DNS resolution failed: %w", err)
 		}
-		if len(ips) > 0 {
-			resolvedIP = ips[0].String()
-		}
+		resolvedIP = ip
 	}
 
 	target := net.JoinHostPort(host, port)
