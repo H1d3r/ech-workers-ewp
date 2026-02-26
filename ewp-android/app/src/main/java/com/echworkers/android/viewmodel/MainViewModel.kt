@@ -8,7 +8,7 @@ import com.echworkers.android.data.NodeRepository
 import com.echworkers.android.data.VpnRepository
 import com.echworkers.android.model.EWPNode
 import com.echworkers.android.model.ProxyMode
-import go.ewpmobile.Ewpmobile
+import ewpmobile.Ewpmobile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
