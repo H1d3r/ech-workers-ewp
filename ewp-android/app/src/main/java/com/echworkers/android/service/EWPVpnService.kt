@@ -13,9 +13,9 @@ import androidx.core.app.NotificationCompat
 import com.echworkers.android.model.EWPNode
 import com.echworkers.android.model.ProxyConfig
 import com.echworkers.android.model.ProxyMode
-import ewpmobile.Ewpmobile
-import ewpmobile.SocketProtector
-import ewpmobile.VPNConfig
+import go.ewpmobile.Ewpmobile
+import go.ewpmobile.SocketProtector
+import go.ewpmobile.VPNConfig
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString

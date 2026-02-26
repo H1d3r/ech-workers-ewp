@@ -70,7 +70,6 @@ jobs:
             -v \
             -target=android \
             -androidapi=21 \
-            -javapkg=ewpmobile \
             -ldflags="-s -w" \
             -o output/android/ewp-core.aar \
             ./ewpmobile

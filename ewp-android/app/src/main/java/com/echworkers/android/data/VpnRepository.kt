@@ -10,7 +10,7 @@ import com.echworkers.android.model.ProxyConfig
 import com.echworkers.android.model.VpnState
 import com.echworkers.android.model.VpnStats
 import com.echworkers.android.service.*
-import ewpmobile.Ewpmobile
+import go.ewpmobile.Ewpmobile
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
