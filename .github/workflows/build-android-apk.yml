@@ -107,25 +107,22 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Decode keystore
-        if: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
-        run: |
-          echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | base64 -d > /tmp/ewp-release.jks
-          echo "SIGNING_KEYSTORE_PATH=/tmp/ewp-release.jks" >> $GITHUB_ENV
-
       - name: Build APK
         working-directory: ewp-android
         env:
+          SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          if [ -n "$SIGNING_KEYSTORE_PATH" ]; then
+          if [ -n "$SIGNING_KEYSTORE_B64" ]; then
             echo "Building signed Release APK"
+            echo "$SIGNING_KEYSTORE_B64" | base64 -d > /tmp/ewp-release.jks
+            export SIGNING_KEYSTORE_PATH=/tmp/ewp-release.jks
             ./gradlew assembleRelease
           else
-            echo "No keystore, building Debug APK"
+            echo "No keystore configured, building Debug APK"
             ./gradlew assembleDebug
           fi
 
