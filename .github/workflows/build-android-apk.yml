@@ -52,16 +52,18 @@ jobs:
           echo "y" | sdkmanager "ndk;25.2.9519653" --sdk_root="$ANDROID_HOME"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
-      - name: Install gomobile
-        run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init
-
       - name: Download Go modules
         run: go mod download
 
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile
+          go install golang.org/x/mobile/cmd/gobind
+          gomobile init
+
       - name: Build Android AAR
+        env:
+          GOFLAGS: -mod=mod
         run: |
           mkdir -p output/android
           gomobile bind \
