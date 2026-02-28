@@ -174,7 +174,7 @@ func (c *SimpleConn) ConnectUDP(target string, initialData []byte) error {
 
 // WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
 func (c *SimpleConn) WriteUDP(target string, data []byte) error {
-	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, target, data)
 	if err != nil {
 		return fmt.Errorf("encode UDP keep packet: %w", err)
 	}

@@ -119,29 +119,8 @@ func (c *Conn) connectTrojanUDP(target string, initialData []byte) error {
 		return fmt.Errorf("send trojan UDP handshake: %w", err)
 	}
 
-	// Send EWP UDPStatusNew as separate message to establish session on server
-	udpAddr, err := net.ResolveUDPAddr("udp", target)
-	if err != nil {
-		return fmt.Errorf("resolve UDP address: %w", err)
-	}
-
-	c.udpGlobalID = ewp.NewGlobalID()
-
-	pkt := &ewp.UDPPacket{
-		GlobalID: c.udpGlobalID,
-		Status:   ewp.UDPStatusNew,
-		Target:   udpAddr,
-		Payload:  initialData,
-	}
-
-	encoded, err := ewp.EncodeUDPPacket(pkt)
-	if err != nil {
-		return fmt.Errorf("encode UDP new packet: %w", err)
-	}
-
-	if err := c.Write(encoded); err != nil {
-		return fmt.Errorf("send UDP new packet: %w", err)
-	}
+	// For Trojan UDP, no additional EWP UDPStatusNew packet is needed.
+	// The UDP handshake and target are already sent.
 
 	log.V("[Trojan] gRPC UDP handshake sent, target: %s", target)
 	return nil
@@ -292,21 +271,59 @@ func (c *Conn) connectEWPUDP(target string, initialData []byte) error {
 
 // WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
 func (c *Conn) WriteUDP(target string, data []byte) error {
-	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if c.useTrojan {
+		addr, err := trojan.ParseAddress(target)
+		if err != nil {
+			return fmt.Errorf("parse address: %w", err)
+		}
+		addrBytes, err := addr.Encode()
+		if err != nil {
+			return fmt.Errorf("encode address: %w", err)
+		}
+		length := uint16(len(data))
+		buf := make([]byte, 0, len(addrBytes)+4+len(data))
+		buf = append(buf, addrBytes...)
+		buf = append(buf, byte(length>>8), byte(length))
+		buf = append(buf, trojan.CRLF...)
+		buf = append(buf, data...)
+		return c.Write(buf)
+	}
+
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, target, data)
 	if err != nil {
 		return fmt.Errorf("encode UDP keep packet: %w", err)
 	}
 	return c.Write(encoded)
 }
 
-// ReadUDP reads and decodes an EWP-framed UDP response packet
+// ReadUDP reads and decodes an EWP-framed or Trojan-framed UDP response packet
 func (c *Conn) ReadUDP() ([]byte, error) {
 	resp := &pb.SocketData{}
 	if err := c.stream.RecvMsg(resp); err != nil {
 		return nil, err
 	}
 	data := resp.Content
-	if !c.useTrojan && c.enableFlow && c.flowState != nil {
+	
+	if c.useTrojan {
+		// Trojan UDP decode: [Address][Length(16)][CRLF][Payload]
+		// In gRPC stream, each RecvMsg usually contains exactly one frame
+		// but we still need to strip the header
+		// Fake an io.Reader to use DecodeAddress, though we have all data in memory
+		// Actually, since this is a datagram, we can just slice it manually
+		if len(data) < 4 { // Minimal size
+			return nil, fmt.Errorf("trojan udp frame too small")
+		}
+		// Skip Type(1)+Length(...) 
+		// Easy way: find CRLF since address can't contain CRLF
+		// It's safer to just decode address.
+		// For simplicity, we can use bytes.Index(data, trojan.CRLF) if we assume host doesn't have CRLF
+		// But port is 2 bytes which might be \r\n. So we must parse.
+		// Wait, we can just use io.ReadFull from bytes.Reader 
+		// Actually we just return the payload, let me implement a quick slicer
+		return decodeTrojanUDP(data)
+	}
+
+	if c.enableFlow && c.flowState != nil {
 		data = c.flowState.ProcessDownlink(data)
 	}
 	return ewp.DecodeUDPPayload(data)
@@ -319,10 +336,55 @@ func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
 		return 0, err
 	}
 	data := resp.Content
-	if !c.useTrojan && c.enableFlow && c.flowState != nil {
+
+	if c.useTrojan {
+		payload, err := decodeTrojanUDP(data)
+		if err != nil {
+			return 0, err
+		}
+		n := copy(buf, payload)
+		return n, nil
+	}
+
+	if c.enableFlow && c.flowState != nil {
 		data = c.flowState.ProcessDownlink(data)
 	}
 	return ewp.DecodeUDPPayloadTo(data, buf)
+}
+
+func decodeTrojanUDP(data []byte) ([]byte, error) {
+	if len(data) < 1 {
+		return nil, fmt.Errorf("empty trojan udp payload")
+	}
+	offset := 1
+	var addrLen int
+	switch data[0] {
+	case trojan.AddressTypeIPv4:
+		addrLen = 4
+	case trojan.AddressTypeIPv6:
+		addrLen = 16
+	case trojan.AddressTypeDomain:
+		if len(data) < 2 {
+			return nil, fmt.Errorf("truncated trojan domain")
+		}
+		addrLen = int(data[1])
+		offset++
+	default:
+		return nil, fmt.Errorf("unknown trojan address type: %d", data[0])
+	}
+	
+	headerLen := offset + addrLen + 2 // Type + Addr + Port
+	if len(data) < headerLen+4 { // + Length(2) + CRLF(2)
+		return nil, fmt.Errorf("truncated trojan udp header")
+	}
+	
+	payloadLen := int(data[headerLen])<<8 | int(data[headerLen+1])
+	payloadStart := headerLen + 4
+	
+	if len(data) < payloadStart+payloadLen {
+		return nil, fmt.Errorf("truncated trojan udp payload")
+	}
+	return data[payloadStart : payloadStart+payloadLen], nil
 }
 
 func (c *Conn) Read(buf []byte) (int, error) {
