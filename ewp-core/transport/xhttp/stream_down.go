@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 
 	"ewp-core/log"
 	"ewp-core/protocol/ewp"
+	"ewp-core/protocol/trojan"
 )
 
 type StreamDownConn struct {
@@ -280,49 +280,51 @@ func (c *StreamDownConn) ConnectUDP(target string, initialData []byte) error {
 
 	c.respBody = getResp.Body
 
-	// Always send UDPStatusNew to establish session on server (with target address)
-	udpAddr, err := net.ResolveUDPAddr("udp", target)
-	if err != nil {
-		return fmt.Errorf("resolve UDP address: %w", err)
-	}
-
-	c.udpGlobalID = ewp.NewGlobalID()
-
-	pkt := &ewp.UDPPacket{
-		GlobalID: c.udpGlobalID,
-		Status:   ewp.UDPStatusNew,
-		Target:   udpAddr,
-		Payload:  initialData,
-	}
-
-	encoded, err := ewp.EncodeUDPPacket(pkt)
-	if err != nil {
-		return fmt.Errorf("encode UDP packet: %w", err)
-	}
-
-	if err := c.Write(encoded); err != nil {
-		return fmt.Errorf("send UDP new packet: %w", err)
-	}
+	// For Trojan UDP, no additional EWP UDPStatusNew packet is needed.
+	// The UDP handshake and target are already included in initial write.
 
 	c.connected = true
-	log.V("[XHTTP] stream-down UDP handshake success, target: %s, SessionID: %s", target, c.sessionID)
+	log.V("[XHTTP] stream-down Trojan UDP connected, target: %s, SessionID: %s", target, c.sessionID)
 	return nil
 }
 
-// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel
 func (c *StreamDownConn) WriteUDP(target string, data []byte) error {
-	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if c.useTrojan {
+		addr, err := trojan.ParseAddress(target)
+		if err != nil {
+			return fmt.Errorf("parse address: %w", err)
+		}
+		addrBytes, err := addr.Encode()
+		if err != nil {
+			return fmt.Errorf("encode address: %w", err)
+		}
+		length := uint16(len(data))
+		buf := make([]byte, 0, len(addrBytes)+4+len(data))
+		buf = append(buf, addrBytes...)
+		buf = append(buf, byte(length>>8), byte(length))
+		buf = append(buf, trojan.CRLF...)
+		buf = append(buf, data...)
+		return c.Write(buf)
+	}
+
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, target, data)
 	if err != nil {
 		return fmt.Errorf("encode UDP keep packet: %w", err)
 	}
 	return c.Write(encoded)
 }
 
-// ReadUDP reads and decodes an EWP-framed UDP response packet from the streaming response
+// ReadUDP reads and decodes a UDP response packet
 func (c *StreamDownConn) ReadUDP() ([]byte, error) {
 	if c.respBody == nil {
 		return nil, errors.New("not connected")
 	}
+	
+	if c.useTrojan {
+		
+	}
+
 	pkt, err := ewp.DecodeUDPPacket(c.respBody)
 	if err != nil {
 		return nil, err
@@ -330,17 +332,52 @@ func (c *StreamDownConn) ReadUDP() ([]byte, error) {
 	return pkt.Payload, nil
 }
 
-// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+// ReadUDPTo reads and decodes a UDP response packet directly into the provided buffer
 func (c *StreamDownConn) ReadUDPTo(buf []byte) (int, error) {
 	if c.respBody == nil {
 		return 0, errors.New("not connected")
 	}
+	
+	if c.useTrojan {
+		payload, err := c.readTrojanUDP()
+		if err != nil {
+			return 0, err
+		}
+		n := copy(buf, payload)
+		return n, nil
+	}
+
 	pkt, err := ewp.DecodeUDPPacket(c.respBody)
 	if err != nil {
 		return 0, err
 	}
 	n := copy(buf, pkt.Payload)
 	return n, nil
+}
+
+func (c *StreamDownConn) readTrojanUDP() ([]byte, error) {
+	addr, err := trojan.DecodeAddress(c.respBody)
+	if err != nil {
+		return nil, fmt.Errorf("read trojan address: %w", err)
+	}
+	_ = addr // not returned
+	
+	lengthBuf := make([]byte, 2)
+	if _, err := io.ReadFull(c.respBody, lengthBuf); err != nil {
+		return nil, fmt.Errorf("read trojan length: %w", err)
+	}
+	length := int(lengthBuf[0])<<8 | int(lengthBuf[1])
+	
+	crlf := make([]byte, 2)
+	if _, err := io.ReadFull(c.respBody, crlf); err != nil {
+		return nil, fmt.Errorf("read trojan crlf: %w", err)
+	}
+	
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(c.respBody, payload); err != nil {
+		return nil, fmt.Errorf("read trojan payload: %w", err)
+	}
+	return payload, nil
 }
 
 func (c *StreamDownConn) Read(buf []byte) (int, error) {

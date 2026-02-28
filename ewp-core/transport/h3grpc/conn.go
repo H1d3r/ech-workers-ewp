@@ -320,29 +320,8 @@ func (c *Conn) trojanConnectUDP(target string, initialData []byte) error {
 		return fmt.Errorf("failed to send UDP handshake: %w", err)
 	}
 
-	// Send EWP UDPStatusNew as separate message to establish session on server
-	udpAddr, err := net.ResolveUDPAddr("udp", target)
-	if err != nil {
-		return fmt.Errorf("resolve UDP address: %w", err)
-	}
-
-	c.udpGlobalID = ewp.NewGlobalID()
-
-	pkt := &ewp.UDPPacket{
-		GlobalID: c.udpGlobalID,
-		Status:   ewp.UDPStatusNew,
-		Target:   udpAddr,
-		Payload:  initialData,
-	}
-
-	encoded, err := ewp.EncodeUDPPacket(pkt)
-	if err != nil {
-		return fmt.Errorf("encode UDP new packet: %w", err)
-	}
-
-	if err := c.Write(encoded); err != nil {
-		return fmt.Errorf("send UDP new packet: %w", err)
-	}
+	// For Trojan UDP, no additional EWP UDPStatusNew packet is needed.
+	// The UDP handshake and target are already sent.
 
 	c.trojanConnected = true
 	log.V("[H3] Trojan UDP connect sent for %s", target)
@@ -424,39 +403,103 @@ func (c *Conn) ewpConnectUDP(target string, initialData []byte) error {
 	return nil
 }
 
-// WriteUDP sends a subsequent UDP packet over the established UDP tunnel (StatusKeep)
+// WriteUDP sends a subsequent UDP packet over the established UDP tunnel
 func (c *Conn) WriteUDP(target string, data []byte) error {
-	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, data)
+	if c.useTrojan {
+		addr, err := trojan.ParseAddress(target)
+		if err != nil {
+			return fmt.Errorf("parse address: %w", err)
+		}
+		addrBytes, err := addr.Encode()
+		if err != nil {
+			return fmt.Errorf("encode address: %w", err)
+		}
+		length := uint16(len(data))
+		buf := make([]byte, 0, len(addrBytes)+4+len(data))
+		buf = append(buf, addrBytes...)
+		buf = append(buf, byte(length>>8), byte(length))
+		buf = append(buf, trojan.CRLF...)
+		buf = append(buf, data...)
+		return c.Write(buf)
+	}
+
+	encoded, err := ewp.EncodeUDPKeepPacket(c.udpGlobalID, target, data)
 	if err != nil {
 		return fmt.Errorf("encode UDP keep packet: %w", err)
 	}
 	return c.Write(encoded)
 }
 
-// ReadUDP reads and decodes an EWP-framed UDP response packet
+// ReadUDP reads and decodes a UDP response packet
 func (c *Conn) ReadUDP() ([]byte, error) {
 	if c.closed {
 		return nil, io.EOF
 	}
 	select {
 	case data := <-c.recvChan:
+		if c.useTrojan {
+			return decodeTrojanUDP(data)
+		}
 		return ewp.DecodeUDPPayload(data)
 	case <-c.closeChan:
 		return nil, io.EOF
 	}
 }
 
-// ReadUDPTo reads and decodes an EWP-framed UDP response packet directly into the provided buffer
+// ReadUDPTo reads and decodes a UDP response packet directly into the provided buffer
 func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
 	if c.closed {
 		return 0, io.EOF
 	}
 	select {
 	case data := <-c.recvChan:
+		if c.useTrojan {
+			payload, err := decodeTrojanUDP(data)
+			if err != nil {
+				return 0, err
+			}
+			n := copy(buf, payload)
+			return n, nil
+		}
 		return ewp.DecodeUDPPayloadTo(data, buf)
 	case <-c.closeChan:
 		return 0, io.EOF
 	}
+}
+
+func decodeTrojanUDP(data []byte) ([]byte, error) {
+	if len(data) < 1 {
+		return nil, fmt.Errorf("empty trojan udp payload")
+	}
+	offset := 1
+	var addrLen int
+	switch data[0] {
+	case trojan.AddressTypeIPv4:
+		addrLen = 4
+	case trojan.AddressTypeIPv6:
+		addrLen = 16
+	case trojan.AddressTypeDomain:
+		if len(data) < 2 {
+			return nil, fmt.Errorf("truncated trojan domain")
+		}
+		addrLen = int(data[1])
+		offset++
+	default:
+		return nil, fmt.Errorf("unknown trojan address type: %d", data[0])
+	}
+	
+	headerLen := offset + addrLen + 2 // Type + Addr + Port
+	if len(data) < headerLen+4 { // + Length(2) + CRLF(2)
+		return nil, fmt.Errorf("truncated trojan udp header")
+	}
+	
+	payloadLen := int(data[headerLen])<<8 | int(data[headerLen+1])
+	payloadStart := headerLen + 4
+	
+	if len(data) < payloadStart+payloadLen {
+		return nil, fmt.Errorf("truncated trojan udp payload")
+	}
+	return data[payloadStart : payloadStart+payloadLen], nil
 }
 
 // Read reads data from the connection.

@@ -337,10 +337,19 @@ func NewGlobalID() [8]byte {
 }
 
 // EncodeUDPKeepPacket 编码 StatusKeep UDP 包 (已建立会话后发送后续数据)
-func EncodeUDPKeepPacket(globalID [8]byte, payload []byte) ([]byte, error) {
+func EncodeUDPKeepPacket(globalID [8]byte, target string, payload []byte) ([]byte, error) {
+	var udpAddr *net.UDPAddr
+	if target != "" {
+		addr, err := net.ResolveUDPAddr("udp", target)
+		if err == nil {
+			udpAddr = addr
+		}
+	}
+
 	pkt := &UDPPacket{
 		GlobalID: globalID,
 		Status:   UDPStatusKeep,
+		Target:   udpAddr,
 		Payload:  payload,
 	}
 	return EncodeUDPPacket(pkt)
