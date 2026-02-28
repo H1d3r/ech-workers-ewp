@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -105,7 +106,15 @@ class EWPVpnService : VpnService(), SocketProtector {
                     return@launch
                 }
                 
-                startForeground(NOTIFICATION_ID, createNotification(node))
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID, 
+                        createNotification(node), 
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, createNotification(node))
+                }
                 
                 val config = buildVPNConfig(node)
                 
@@ -195,7 +204,6 @@ class EWPVpnService : VpnService(), SocketProtector {
                 .addRoute(VPN_ROUTE, 0)
                 .addDnsServer(VPN_DNS)
                 .setMtu(VPN_MTU)
-                .setBlocking(false)
             
             configureProxyMode(builder)
             
