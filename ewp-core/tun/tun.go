@@ -116,7 +116,10 @@ func New(cfg *Config) (*TUN, error) {
 
 	stackName := cfg.Stack
 	if stackName == "" {
-		stackName = "system"
+		// Leave empty — sing-tun's NewStack("") auto-selects the optimal stack:
+		// "mixed" when gVisor is available (gVisor TCP + system UDP), which is
+		// more reliable than pure "system" stack on all platforms.
+		stackName = ""
 	}
 	cfg.Stack = stackName
 
@@ -200,6 +203,16 @@ func New(cfg *Config) (*TUN, error) {
 }
 
 func (t *TUN) Start() error {
+	// CRITICAL: Start the TUN device first — this registers the interface with
+	// the OS monitor and, when AutoRoute is enabled, adds routes to the routing
+	// table (gateway, 0.0.0.0/0 etc.) and sets up WFP firewall rules on Windows.
+	// Without this call the TUN NIC has no gateway and traffic stays on the
+	// physical adapter.
+	if err := t.device.Start(); err != nil {
+		return fmt.Errorf("start TUN device failed: %w", err)
+	}
+
+	// Then start the network stack (TCP NAT listeners / gVisor endpoint / etc.)
 	if err := t.stack.Start(); err != nil {
 		return fmt.Errorf("start stack failed: %w", err)
 	}

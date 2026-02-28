@@ -350,8 +350,10 @@ func (i *InboundConfig) Validate() error {
 		if i.MTU < 576 {
 			return fmt.Errorf("MTU must be at least 576")
 		}
-		if i.Stack == "" {
-			i.Stack = "system"
+		// Stack: "" (auto-select), "mixed", "gvisor", "system" are all valid
+		validStacks := map[string]bool{"": true, "mixed": true, "gvisor": true, "system": true}
+		if !validStacks[i.Stack] {
+			return fmt.Errorf("invalid stack: %s (valid: mixed, gvisor, system, or empty for auto)", i.Stack)
 		}
 		i.AutoRoute = true
 	}
