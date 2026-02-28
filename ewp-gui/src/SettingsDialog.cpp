@@ -82,7 +82,7 @@ SettingsDialog::AppSettings SettingsDialog::loadFromRegistry()
     
     appSettings.tunIP = settings.value("tun/ip", "10.0.85.2/24").toString();
     appSettings.tunMTU = settings.value("tun/mtu", 1380).toInt();
-    appSettings.tunStack = settings.value("tun/stack", "system").toString();
+    appSettings.tunStack = settings.value("tun/stack", "mixed").toString();
     appSettings.tunAutoRoute = settings.value("tun/autoRoute", true).toBool();
     appSettings.tunStrictRoute = settings.value("tun/strictRoute", false).toBool();
     
@@ -119,7 +119,7 @@ SettingsDialog::AppSettings SettingsDialog::defaultSettings()
     
     settings.tunIP = "10.0.85.2/24";
     settings.tunMTU = 1380;
-    settings.tunStack = "system";
+    settings.tunStack = "mixed";
     settings.tunAutoRoute = true;
     settings.tunStrictRoute = false;
     

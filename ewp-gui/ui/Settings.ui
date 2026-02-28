@@ -216,12 +216,17 @@
        <widget class="QComboBox" name="comboTunStack">
         <item>
          <property name="text">
-          <string>system</string>
+          <string>mixed</string>
          </property>
         </item>
         <item>
          <property name="text">
           <string>gvisor</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>system</string>
          </property>
         </item>
        </widget>
