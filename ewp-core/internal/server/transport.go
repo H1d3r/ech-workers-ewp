@@ -107,6 +107,7 @@ func (tf *TunnelForwarder) forwardDownlink() {
 	var writeOnceUserUUID []byte
 	if tf.enableFlow && tf.flowState != nil {
 		writeOnceUserUUID = make([]byte, 16)
+		copy(writeOnceUserUUID, tf.flowState.UserUUID)
 	}
 
 	for {
