@@ -183,11 +183,18 @@ func New(cfg *Config) (*TUN, error) {
 
 	stack, err := tun.NewStack(stackName, stackOptions)
 	if err != nil {
-		tunDevice.Close()
-		interfaceMonitor.Close()
-		networkMonitor.Close()
-		cancel()
-		return nil, fmt.Errorf("create stack failed: %w", err)
+		// Auto-fallback: if gVisor/mixed fails because it's not compiled in, retry with system stack
+		if stackName != "system" && strings.Contains(err.Error(), "gVisor is not included") {
+			log.Printf("[TUN] %s stack unavailable (gVisor not compiled), falling back to system stack", stackName)
+			stack, err = tun.NewStack("system", stackOptions)
+		}
+		if err != nil {
+			tunDevice.Close()
+			interfaceMonitor.Close()
+			networkMonitor.Close()
+			cancel()
+			return nil, fmt.Errorf("create stack failed: %w", err)
+		}
 	}
 
 	return &TUN{

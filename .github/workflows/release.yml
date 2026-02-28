@@ -64,12 +64,12 @@ jobs:
           cd cmd/client
           
           # Windows
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe .
-          GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-windows-arm64.exe .
+          GOOS=windows GOARCH=amd64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-windows-amd64.exe .
+          GOOS=windows GOARCH=arm64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-windows-arm64.exe .
           
           # Linux
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-amd64 .
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-arm64 .
+          GOOS=linux GOARCH=amd64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -tags with_gvisor -ldflags="-s -w -X main.Version=${{ github.event.inputs.version }}" -o ../../ewp-core-client-${{ github.event.inputs.version }}-linux-arm64 .
       
       - name: Upload Client Artifacts
         uses: actions/upload-artifact@v4
