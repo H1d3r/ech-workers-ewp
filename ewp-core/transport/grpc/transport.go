@@ -281,7 +281,7 @@ func (t *Transport) getOrCreateConn(host, sniOverride, addr string) (*grpc.Clien
 	opts = append(opts, grpc.WithKeepaliveParams(keepalive.ClientParameters{
 		Time:                idleTimeout,
 		Timeout:             healthCheckTimeout,
-		PermitWithoutStream: true,
+		PermitWithoutStream: t.permitWithoutStream,
 	}))
 
 	if t.initialWindowSize > 0 {

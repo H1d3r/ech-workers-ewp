@@ -25,6 +25,7 @@ type Conn struct {
 
 	uuid       [16]byte
 	password   string
+	key        [trojan.KeyLength]byte
 	enableFlow bool
 	useTrojan  bool
 
@@ -176,69 +177,62 @@ func (c *Conn) Connect(target string, initialData []byte) error {
 
 // ewpConnect sends EWP protocol connect request
 func (c *Conn) ewpConnect(target string, initialData []byte) error {
-	// Parse target address
 	addr, err := ewp.ParseAddress(target)
 	if err != nil {
 		return fmt.Errorf("invalid target address: %w", err)
 	}
 
-	// Encode address to bytes
-	addrBytes, err := addr.Encode()
+	req := ewp.NewHandshakeRequest(c.uuid, ewp.CommandTCP, addr)
+	handshakeData, err := req.Encode()
 	if err != nil {
-		return fmt.Errorf("failed to encode address: %w", err)
+		return fmt.Errorf("encode handshake: %w", err)
 	}
 
-	// Build connect request
-	connectReq := &pb.SocketData{
-		Content: make([]byte, 16+len(addrBytes)+len(initialData)),
-	}
-
-	// Copy UUID
-	copy(connectReq.Content[0:16], c.uuid[:])
-
-	// Copy address
-	copy(connectReq.Content[16:], addrBytes)
-
-	// Copy initial data if present
-	if len(initialData) > 0 {
-		copy(connectReq.Content[16+len(addrBytes):], initialData)
-	}
-
-	// Apply flow padding if enabled
-	if c.enableFlow && c.flowState != nil {
-		userUUID := c.uuid[:]
-		connectReq.Content = c.flowState.PadUplink(connectReq.Content, &userUUID)
-	}
-
-	// Marshal protobuf
-	data, err := proto.Marshal(connectReq)
+	socketData := &pb.SocketData{Content: handshakeData}
+	data, err := proto.Marshal(socketData)
 	if err != nil {
-		return fmt.Errorf("failed to marshal connect request: %w", err)
+		return fmt.Errorf("marshal handshake: %w", err)
 	}
-
-	// Encode and send
 	if err := c.encoder.Encode(data); err != nil {
-		return fmt.Errorf("failed to send connect request: %w", err)
+		return fmt.Errorf("send handshake: %w", err)
 	}
 
-	log.V("[H3] Connect request sent for %s", target)
+	select {
+	case respData := <-c.recvChan:
+		resp, err := ewp.DecodeHandshakeResponse(respData, req.Version, req.Nonce, c.uuid)
+		if err != nil {
+			return fmt.Errorf("decode handshake response: %w", err)
+		}
+		if resp.Status != ewp.StatusOK {
+			return fmt.Errorf("handshake failed: status=%d", resp.Status)
+		}
+	case <-c.closeChan:
+		return fmt.Errorf("connection closed during handshake")
+	}
+
+	if c.enableFlow {
+		c.flowState = ewp.NewFlowState(c.uuid[:])
+	}
+
+	if len(initialData) > 0 {
+		if err := c.Write(initialData); err != nil {
+			return fmt.Errorf("send initial data: %w", err)
+		}
+	}
+
+	log.V("[H3] EWP TCP connect ok: %s", target)
 	return nil
 }
 
 // trojanConnect sends Trojan protocol connect request
 func (c *Conn) trojanConnect(target string, initialData []byte) error {
-	// Parse target address
 	addr, err := trojan.ParseAddress(target)
 	if err != nil {
 		return fmt.Errorf("parse address: %w", err)
 	}
 
-	// Generate key
-	key := trojan.GenerateKey(c.password)
-
-	// Build Trojan handshake
 	var handshakeData []byte
-	handshakeData = append(handshakeData, key[:]...)
+	handshakeData = append(handshakeData, c.key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 	handshakeData = append(handshakeData, trojan.CommandTCP)
 
@@ -287,18 +281,13 @@ func (c *Conn) ConnectUDP(target string, initialData []byte) error {
 
 // trojanConnectUDP sends Trojan protocol UDP connect request
 func (c *Conn) trojanConnectUDP(target string, initialData []byte) error {
-	// Parse target address
 	addr, err := trojan.ParseAddress(target)
 	if err != nil {
 		return fmt.Errorf("parse address: %w", err)
 	}
 
-	// Generate key
-	key := trojan.GenerateKey(c.password)
-
-	// Build Trojan UDP handshake (without raw initial data)
 	var handshakeData []byte
-	handshakeData = append(handshakeData, key[:]...)
+	handshakeData = append(handshakeData, c.key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 	handshakeData = append(handshakeData, trojan.CommandUDP)
 
@@ -355,7 +344,19 @@ func (c *Conn) ewpConnectUDP(target string, initialData []byte) error {
 		return fmt.Errorf("failed to send handshake: %w", err)
 	}
 
-	// Initialize flow state if enabled
+	select {
+	case respData := <-c.recvChan:
+		resp, err := ewp.DecodeHandshakeResponse(respData, req.Version, req.Nonce, c.uuid)
+		if err != nil {
+			return fmt.Errorf("decode UDP handshake response: %w", err)
+		}
+		if resp.Status != ewp.StatusOK {
+			return fmt.Errorf("UDP handshake failed: status=%d", resp.Status)
+		}
+	case <-c.closeChan:
+		return fmt.Errorf("connection closed during UDP handshake")
+	}
+
 	if c.enableFlow {
 		c.flowState = ewp.NewFlowState(c.uuid[:])
 	}

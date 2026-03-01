@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"ewp-core/internal/server"
@@ -10,16 +11,14 @@ import (
 	"ewp-core/protocol/trojan"
 	wstransport "ewp-core/transport/websocket"
 
-	"github.com/gorilla/websocket"
+	"github.com/lxzan/gws"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+func isWebSocketRequest(r *http.Request) bool {
+	return strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	// Path routing is already handled by http.ServeMux — no need to re-check here.
-
 	proto := r.Header.Get("Sec-WebSocket-Protocol")
 	if trojanMode {
 		if proto != password {
@@ -33,26 +32,31 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !websocket.IsWebSocketUpgrade(r) {
+	if !isWebSocketRequest(r) {
 		disguiseHandler(w, r)
 		return
 	}
 
-	conn, err := upgrader.Upgrade(w, r, http.Header{"Sec-WebSocket-Protocol": {proto}})
+	adapter := wstransport.NewServerAdapter()
+	upgrader := gws.NewUpgrader(adapter, &gws.ServerOption{
+		SubProtocols:   []string{proto},
+		ReadBufferSize: 65536,
+		ResponseHeader: http.Header{"Sec-WebSocket-Protocol": {proto}},
+	})
+
+	socket, err := upgrader.Upgrade(w, r)
 	if err != nil {
 		log.Warn("WebSocket upgrade error: %v", err)
 		return
 	}
-	defer conn.Close()
+	adapter.SetSocket(socket)
+	defer adapter.Close()
 
-	log.Info("WebSocket connected: %s %s", r.Method, r.URL.Path)
-	handleWebSocket(conn, r.RemoteAddr)
-}
+	go socket.ReadLoop()
 
-func handleWebSocket(conn *websocket.Conn, clientAddr string) {
-	_, firstMsg, err := conn.ReadMessage()
+	firstMsg, err := adapter.ReadFirst()
 	if err != nil {
-		log.Warn("WebSocket: Failed to read first message: %v", err)
+		log.Warn("WebSocket: failed to read first message: %v", err)
 		return
 	}
 
@@ -68,10 +72,11 @@ func handleWebSocket(conn *websocket.Conn, clientAddr string) {
 		}
 	}
 
+	log.Info("WebSocket connected: %s %s", r.Method, r.URL.Path)
 	opts := server.TunnelOptions{
 		Protocol:  newProtocolHandler(),
-		Transport: wstransport.NewServerAdapter(conn),
-		ClientIP:  clientAddr,
+		Transport: adapter,
+		ClientIP:  r.RemoteAddr,
 		Timeout:   10 * time.Second,
 	}
 	server.EstablishTunnel(context.Background(), firstMsg, opts)

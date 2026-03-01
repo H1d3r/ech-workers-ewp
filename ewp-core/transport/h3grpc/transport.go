@@ -13,6 +13,7 @@ import (
 
 	commontls "ewp-core/common/tls"
 	"ewp-core/log"
+	"ewp-core/protocol/trojan"
 	"ewp-core/transport"
 
 	"github.com/quic-go/quic-go"
@@ -348,6 +349,9 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		sendChan:   make(chan []byte, 32),
 		closeChan:  make(chan struct{}),
 		connReady:  make(chan struct{}),
+	}
+	if t.useTrojan {
+		conn.key = trojan.GenerateKey(t.password)
 	}
 
 	return conn, nil
