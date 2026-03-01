@@ -2,45 +2,99 @@ package websocket
 
 import (
 	"io"
+	"sync"
 
-	"github.com/gorilla/websocket"
+	"github.com/lxzan/gws"
 )
 
+// ServerAdapter wraps a server-side gws connection and bridges the event-driven
+// OnMessage API to the blocking Read()/Write() interface expected by the tunnel handler.
+// It also implements gws.Event so it can be passed directly as the per-connection handler.
 type ServerAdapter struct {
-	conn   *websocket.Conn
-	closed bool
+	gws.BuiltinEventHandler
+
+	socket    *gws.Conn
+	msgCh     chan *gws.Message
+	closeCh   chan struct{}
+	closeOnce sync.Once
+	leftover  []byte
 }
 
-func NewServerAdapter(conn *websocket.Conn) *ServerAdapter {
+func NewServerAdapter() *ServerAdapter {
 	return &ServerAdapter{
-		conn:   conn,
-		closed: false,
+		msgCh:   make(chan *gws.Message, 16),
+		closeCh: make(chan struct{}),
 	}
 }
 
-func (a *ServerAdapter) Read() ([]byte, error) {
-	msgType, msg, err := a.conn.ReadMessage()
-	if err != nil {
-		return nil, err
-	}
+// SetSocket must be called immediately after the gws Upgrade succeeds.
+func (a *ServerAdapter) SetSocket(socket *gws.Conn) {
+	a.socket = socket
+}
 
-	// Control messages are sent as TextMessage (see Close())
-	if msgType == websocket.TextMessage && string(msg) == "CLOSE" {
+// --- gws.Event callbacks ---
+
+func (a *ServerAdapter) OnClose(socket *gws.Conn, err error) {
+	a.closeOnce.Do(func() { close(a.closeCh) })
+}
+
+func (a *ServerAdapter) OnPing(socket *gws.Conn, payload []byte) {
+	_ = socket.WritePong(payload)
+}
+
+func (a *ServerAdapter) OnMessage(socket *gws.Conn, message *gws.Message) {
+	select {
+	case a.msgCh <- message:
+	case <-a.closeCh:
+		message.Close()
+	}
+}
+
+// ReadFirst blocks until the first message arrives (used to sniff the protocol header).
+func (a *ServerAdapter) ReadFirst() ([]byte, error) {
+	select {
+	case msg, ok := <-a.msgCh:
+		if !ok {
+			return nil, io.EOF
+		}
+		data := make([]byte, len(msg.Bytes()))
+		copy(data, msg.Bytes())
+		msg.Close()
+		return data, nil
+	case <-a.closeCh:
 		return nil, io.EOF
 	}
+}
 
-	return msg, nil
+// Read implements the server transport.Transport interface (blocking, leftover-safe).
+func (a *ServerAdapter) Read() ([]byte, error) {
+	if len(a.leftover) > 0 {
+		data := a.leftover
+		a.leftover = nil
+		return data, nil
+	}
+	select {
+	case msg, ok := <-a.msgCh:
+		if !ok {
+			return nil, io.EOF
+		}
+		data := make([]byte, len(msg.Bytes()))
+		copy(data, msg.Bytes())
+		msg.Close()
+		return data, nil
+	case <-a.closeCh:
+		return nil, io.EOF
+	}
 }
 
 func (a *ServerAdapter) Write(data []byte) error {
-	return a.conn.WriteMessage(websocket.BinaryMessage, data)
+	return a.socket.WriteMessage(gws.OpcodeBinary, data)
 }
 
 func (a *ServerAdapter) Close() error {
-	if !a.closed {
-		a.closed = true
-		a.conn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
-		return a.conn.Close()
-	}
+	a.closeOnce.Do(func() {
+		close(a.closeCh)
+		_ = a.socket.WriteClose(1000, nil)
+	})
 	return nil
 }

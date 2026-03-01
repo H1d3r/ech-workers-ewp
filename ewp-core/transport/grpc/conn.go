@@ -21,16 +21,18 @@ type Conn struct {
 	stream            grpc.ClientStream
 	uuid              [16]byte
 	password          string
+	key               [trojan.KeyLength]byte
 	mu                sync.Mutex
 	enableFlow        bool
 	useTrojan         bool
 	flowState         *ewp.FlowState
 	writeOnceUserUUID []byte
 	udpGlobalID       [8]byte
+	leftover          []byte
 }
 
 func NewConn(conn *grpc.ClientConn, stream grpc.ClientStream, uuid [16]byte, password string, enableFlow, useTrojan bool) *Conn {
-	return &Conn{
+	c := &Conn{
 		conn:       conn,
 		stream:     stream,
 		uuid:       uuid,
@@ -38,6 +40,10 @@ func NewConn(conn *grpc.ClientConn, stream grpc.ClientStream, uuid [16]byte, pas
 		enableFlow: enableFlow,
 		useTrojan:  useTrojan,
 	}
+	if useTrojan {
+		c.key = trojan.GenerateKey(password)
+	}
+	return c
 }
 
 func (c *Conn) Connect(target string, initialData []byte) error {
@@ -53,11 +59,8 @@ func (c *Conn) connectTrojan(target string, initialData []byte) error {
 		return fmt.Errorf("parse address: %w", err)
 	}
 
-	key := trojan.GenerateKey(c.password)
-
-	// Build Trojan handshake
 	var handshakeData []byte
-	handshakeData = append(handshakeData, key[:]...)
+	handshakeData = append(handshakeData, c.key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 	handshakeData = append(handshakeData, trojan.CommandTCP)
 
@@ -97,11 +100,8 @@ func (c *Conn) connectTrojanUDP(target string, initialData []byte) error {
 		return fmt.Errorf("parse address: %w", err)
 	}
 
-	key := trojan.GenerateKey(c.password)
-
-	// Build Trojan UDP handshake (without raw initial data)
 	var handshakeData []byte
-	handshakeData = append(handshakeData, key[:]...)
+	handshakeData = append(handshakeData, c.key[:]...)
 	handshakeData = append(handshakeData, trojan.CRLF...)
 	handshakeData = append(handshakeData, trojan.CommandUDP)
 
@@ -168,30 +168,8 @@ func (c *Conn) connectEWP(target string, initialData []byte) error {
 	}
 
 	if len(initialData) > 0 {
-		var writeErr error
-		for retry := 0; retry < 3; retry++ {
-			if retry > 0 {
-				time.Sleep(time.Duration(retry*10) * time.Millisecond)
-			}
-
-			if err := c.Write(initialData); err != nil {
-				writeErr = err
-				if retry < 2 && (err == io.EOF ||
-					strings.Contains(err.Error(), "connection reset") ||
-					strings.Contains(err.Error(), "broken pipe") ||
-					strings.Contains(err.Error(), "use of closed network connection")) {
-					log.V("[gRPC] Send initial data failed, retry %d/3: %v", retry+1, err)
-					continue
-				}
-				break
-			} else {
-				writeErr = nil
-				break
-			}
-		}
-
-		if writeErr != nil {
-			return fmt.Errorf("send initial data: %w", writeErr)
+		if err := c.Write(initialData); err != nil {
+			return fmt.Errorf("send initial data: %w", err)
 		}
 	}
 
@@ -388,20 +366,25 @@ func decodeTrojanUDP(data []byte) ([]byte, error) {
 }
 
 func (c *Conn) Read(buf []byte) (int, error) {
-	resp := &pb.SocketData{}
-	err := c.stream.RecvMsg(resp)
-	if err != nil {
-		return 0, err
-	}
-
-	data := resp.Content
-
-	// Only apply flow processing for EWP mode
-	if !c.useTrojan && c.enableFlow && c.flowState != nil {
-		data = c.flowState.ProcessDownlink(data)
+	var data []byte
+	if len(c.leftover) > 0 {
+		data = c.leftover
+		c.leftover = nil
+	} else {
+		resp := &pb.SocketData{}
+		if err := c.stream.RecvMsg(resp); err != nil {
+			return 0, err
+		}
+		data = resp.Content
+		if !c.useTrojan && c.enableFlow && c.flowState != nil {
+			data = c.flowState.ProcessDownlink(data)
+		}
 	}
 
 	n := copy(buf, data)
+	if n < len(data) {
+		c.leftover = append([]byte(nil), data[n:]...)
+	}
 	return n, nil
 }
 
