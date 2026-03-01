@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +62,8 @@ func NewTunnelDNSResolver(trans transport.Transport, config TunnelDNSConfig) (*T
 	dohServer := config.DoHServer
 	if dohServer == "" {
 		dohServer = "https://dns.google/dns-query"
+	} else if !strings.HasPrefix(dohServer, "https://") && !strings.HasPrefix(dohServer, "http://") {
+		dohServer = "https://" + dohServer
 	}
 
 	maxConcurrent := config.MaxConcurrent
@@ -88,6 +91,11 @@ func NewTunnelDNSResolver(trans transport.Transport, config TunnelDNSConfig) (*T
 
 	log.Printf("[TunnelDNS] Initialized: DoH=%s, maxConcurrent=%d", dohServer, maxConcurrent)
 	return resolver, nil
+}
+
+// DoHServer returns the configured DoH server URL.
+func (r *TunnelDNSResolver) DoHServer() string {
+	return r.dohServer
 }
 
 // QueryRaw performs a raw DNS query through the proxy tunnel using DoH (RFC 8484).

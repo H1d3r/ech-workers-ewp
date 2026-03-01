@@ -30,6 +30,7 @@ SettingsDialog::AppSettings SettingsDialog::getSettings() const
     
     settings.tunnelDNS = ui->editTunnelDNS->text();
     settings.tunnelDNSv6 = ui->editTunnelDNSv6->text();
+    settings.tunnelDoHServer = ui->editTunnelDoHServer->text();
     
     settings.tunIP = ui->editTunIP->text();
     settings.tunMTU = ui->spinTunMTU->value();
@@ -48,6 +49,7 @@ void SettingsDialog::setSettings(const AppSettings &settings)
     
     ui->editTunnelDNS->setText(settings.tunnelDNS);
     ui->editTunnelDNSv6->setText(settings.tunnelDNSv6);
+    ui->editTunnelDoHServer->setText(settings.tunnelDoHServer);
     
     ui->editTunIP->setText(settings.tunIP);
     ui->spinTunMTU->setValue(settings.tunMTU);
@@ -79,6 +81,7 @@ SettingsDialog::AppSettings SettingsDialog::loadFromRegistry()
     
     appSettings.tunnelDNS = settings.value("tun/dns", "8.8.8.8").toString();
     appSettings.tunnelDNSv6 = settings.value("tun/ipv6_dns", "2001:4860:4860::8888").toString();
+    appSettings.tunnelDoHServer = settings.value("tun/doh_server", "").toString();
     
     appSettings.tunIP = settings.value("tun/ip", "10.0.85.2/24").toString();
     appSettings.tunMTU = settings.value("tun/mtu", 1380).toInt();
@@ -99,6 +102,7 @@ void SettingsDialog::saveToRegistry(const AppSettings &settings)
     
     qSettings.setValue("tun/dns", settings.tunnelDNS);
     qSettings.setValue("tun/ipv6_dns", settings.tunnelDNSv6);
+    qSettings.setValue("tun/doh_server", settings.tunnelDoHServer);
     
     qSettings.setValue("tun/ip", settings.tunIP);
     qSettings.setValue("tun/mtu", settings.tunMTU);
@@ -116,6 +120,7 @@ SettingsDialog::AppSettings SettingsDialog::defaultSettings()
     
     settings.tunnelDNS = "8.8.8.8";
     settings.tunnelDNSv6 = "2001:4860:4860::8888";
+    settings.tunnelDoHServer = "";
     
     settings.tunIP = "10.0.85.2/24";
     settings.tunMTU = 1380;

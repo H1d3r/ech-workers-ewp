@@ -65,9 +65,9 @@ type InboundConfig struct {
 	AutoRoute     bool     `json:"auto_route,omitempty"`
 	StrictRoute   bool     `json:"strict_route,omitempty"`
 	Stack         string   `json:"stack,omitempty"`      // gvisor, system
-	DNS           string   `json:"dns,omitempty"`        // IPv4 DNS server
-	IPv6DNS       string   `json:"ipv6_dns,omitempty"`   // IPv6 DNS server
-	TunnelDNS     []string `json:"tunnel_dns,omitempty"` // Remote DNS servers for TUN mode (format: "type:address", e.g., "doq:dns.google:853")
+	DNS             string `json:"dns,omitempty"`              // IPv4 DNS server address advertised to the TUN interface
+	IPv6DNS         string `json:"ipv6_dns,omitempty"`         // IPv6 DNS server address advertised to the TUN interface
+	TunnelDoHServer string `json:"tunnel_doh_server,omitempty"` // DoH server URL used for DNS-over-tunnel (default: https://dns.google/dns-query)
 }
 
 // OutboundConfig defines an outbound connection handler

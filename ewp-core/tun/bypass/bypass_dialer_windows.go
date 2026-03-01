@@ -1,6 +1,6 @@
 //go:build windows
 
-package tun
+package bypass
 
 import (
 	"encoding/binary"

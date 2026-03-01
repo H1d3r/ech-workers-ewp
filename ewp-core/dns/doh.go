@@ -27,15 +27,25 @@ type Client struct {
 
 // NewClient creates a new DoH client that works without DNS resolution
 func NewClient(serverURL string) *Client {
+	return NewClientWithDialer(serverURL, nil)
+}
+
+// NewClientWithDialer creates a new DoH client using the provided dialer for TCP connections.
+// Pass a bypass dialer (e.g. bound to a physical interface) to prevent the DoH request
+// from being intercepted by a TUN device. Pass nil to use the default dialer.
+func NewClientWithDialer(serverURL string, dialer *net.Dialer) *Client {
 	if !strings.HasPrefix(serverURL, "https://") && !strings.HasPrefix(serverURL, "http://") {
 		serverURL = "https://" + serverURL
+	}
+
+	if dialer == nil {
+		dialer = &net.Dialer{Timeout: 5 * time.Second}
 	}
 
 	// Parse URL to get server name for SNI
 	u, err := url.Parse(serverURL)
 	if err != nil {
 		log.Printf("[DoH Client] Invalid URL %s: %v", serverURL, err)
-		// Fallback to simple client
 		return &Client{
 			ServerURL: serverURL,
 			Timeout:   10 * time.Second,
@@ -47,14 +57,13 @@ func NewClient(serverURL string) *Client {
 
 	serverName := u.Hostname()
 
-	// Create TLS config for HTTP/2
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"h2"},
 		ServerName: serverName,
 	}
 
-	// Create HTTP/2 transport with custom dialer (no DNS resolution needed)
+	d := dialer
 	transport := &http2.Transport{
 		TLSClientConfig:    tlsConfig,
 		DisableCompression: false,
@@ -62,18 +71,12 @@ func NewClient(serverURL string) *Client {
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			log.V("[DoH Client] Dialing %s %s (SNI: %s)", network, addr, cfg.ServerName)
 
-			dialer := &net.Dialer{
-				Timeout: 5 * time.Second,
-			}
-
-			// Dial TCP connection
-			conn, err := dialer.DialContext(ctx, network, addr)
+			conn, err := d.DialContext(ctx, network, addr)
 			if err != nil {
 				log.Printf("[DoH Client] TCP dial failed: %v", err)
 				return nil, err
 			}
 
-			// Perform TLS handshake
 			tlsConn := tls.Client(conn, cfg)
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				conn.Close()

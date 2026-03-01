@@ -1,6 +1,6 @@
 //go:build linux || android
 
-package tun
+package util
 
 import (
 	"net"

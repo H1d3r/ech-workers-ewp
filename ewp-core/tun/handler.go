@@ -3,7 +3,9 @@ package tun
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	commpool "ewp-core/common/bufferpool"
@@ -11,45 +13,55 @@ import (
 	"ewp-core/log"
 	"ewp-core/transport"
 
-	"github.com/sagernet/sing/common/buf"
-	M "github.com/sagernet/sing/common/metadata"
-	N "github.com/sagernet/sing/common/network"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
+
+// udpSession represents a proxy tunnel connection for a specific local UDP socket
+type udpSession struct {
+	tunnelConn transport.TunnelConn
+	remoteAddr netip.AddrPort // the remote server addr (responses appear to come FROM here)
+	lastActive atomic.Int64  // UnixNano; updated on every packet, read by cleanup goroutine
+}
+
+// UDPWriter allows the handler to write responses back to the TUN virtual device
+type UDPWriter interface {
+	WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPort) error
+	ReleaseConn(src netip.AddrPort, dst netip.AddrPort)
+}
 
 type Handler struct {
 	transport   transport.Transport
 	ctx         context.Context
 	dnsResolver *dns.TunnelDNSResolver
+
+	udpWriter   UDPWriter
+	udpSessions sync.Map // map[string]*udpSession (key is localAddr string)
 }
 
-func NewHandler(ctx context.Context, trans transport.Transport) *Handler {
-	return &Handler{
+func NewHandler(ctx context.Context, trans transport.Transport, udpWriter UDPWriter) *Handler {
+	h := &Handler{
 		transport: trans,
 		ctx:       ctx,
+		udpWriter: udpWriter,
 	}
+
+	// Start UDP Session Cleanup coroutine (Full Cone NAT state tracking)
+	go h.cleanupUDPSessions()
+
+	return h
 }
 
 // SetDNSResolver sets the tunnel DNS resolver for handling DNS queries (port 53).
-// When set, DNS queries intercepted by sing-tun are resolved through the proxy tunnel
-// using DoH/DoT/DoQ, preventing DNS leaks and ensuring encrypted resolution.
 func (h *Handler) SetDNSResolver(resolver *dns.TunnelDNSResolver) {
 	h.dnsResolver = resolver
 }
 
-func (h *Handler) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr) error {
-	log.V("[TUN] Preparing connection: %s %s -> %s", network, source, destination)
-	return nil
-}
+func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
+	dstAddr := conn.LocalAddr().(*net.TCPAddr)
+	srcAddr := conn.RemoteAddr().(*net.TCPAddr)
 
-func (h *Handler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	defer func() {
-		if onClose != nil {
-			onClose(nil)
-		}
-	}()
-
-	target := destination.String()
-	log.Printf("[TUN TCP] New connection: %s -> %s", source, target)
+	target := dstAddr.String()
+	log.Printf("[TUN TCP] New connection: %s -> %s", srcAddr, target)
 
 	tunnelConn, err := h.transport.Dial()
 	if err != nil {
@@ -111,151 +123,160 @@ func (h *Handler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 	log.Printf("[TUN TCP] Disconnected: %s", target)
 }
 
-func (h *Handler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	defer func() {
-		if onClose != nil {
-			onClose(nil)
-		}
-	}()
+func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) {
+	target := dst.String()
 
-	target := destination.String()
-
-	// DNS interception: resolve port 53 queries locally through the tunnel DNS resolver
-	// (DoH/DoT/DoQ), then write the response back to the TUN device directly.
-	if destination.Port == 53 && h.dnsResolver != nil {
-		log.V("[TUN DNS] Intercepted DNS query: %s -> %s", source, target)
-		h.handleDNS(ctx, conn, source, destination)
+	// DNS interception: resolve port 53 queries locally
+	if dst.Port() == 53 && h.dnsResolver != nil {
+		log.V("[TUN DNS] Intercepted DNS query: %s -> %s", src, target)
+		h.handleDNS(payload, src, dst)
 		return
 	}
 
-	if destination.Port == 3478 || destination.Port == 19302 {
-		log.Printf("[TUN WebRTC] STUN request intercepted: %s -> %s (tunneled)", source, target)
+	// Get or Create UDP tunnel session for the source IP:Port (NAT binding)
+	srcKey := src.String()
+
+	val, ok := h.udpSessions.Load(srcKey)
+	var session *udpSession
+
+	if !ok {
+		// Create a new tunnel connection for this local UDP port
+		tunnelConn, err := h.transport.Dial()
+		if err != nil {
+			log.Printf("[TUN UDP] Tunnel dial failed for %s: %v", srcKey, err)
+			return
+		}
+
+		session = &udpSession{
+			tunnelConn: tunnelConn,
+			remoteAddr: dst, // dst is always an IP (from gVisor), safe to store directly
+		}
+		session.lastActive.Store(time.Now().UnixNano())
+
+		actual, loaded := h.udpSessions.LoadOrStore(srcKey, session)
+		if loaded {
+			// Another goroutine beat us to it, close the one we just made
+			tunnelConn.Close()
+			session = actual.(*udpSession)
+		} else {
+			log.V("[TUN UDP] New session binding: %s -> %s", srcKey, dst)
+
+			// We only `ConnectUDP` once per pseudo-socket to trick Trojan
+			// into maintaining a pseudo-socket. The destination passed here
+			// is completely arbitrary since UDP mapping sends the actual target string
+			// inside every WebSocket/transport packet frame anyway.
+			// We just arbitrarily use the First Packet's target.
+			if err := tunnelConn.ConnectUDP(target, nil); err != nil {
+				log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
+				tunnelConn.Close()
+				h.udpSessions.Delete(srcKey)
+				return
+			}
+
+			go h.udpReadLoop(srcKey, session, src)
+		}
 	} else {
-		log.V("[TUN UDP] New packet connection: %s -> %s", source, target)
+		session = val.(*udpSession)
 	}
 
-	tunnelConn, err := h.transport.Dial()
-	if err != nil {
-		log.Printf("[TUN UDP] Tunnel dial failed: %v", err)
-		conn.Close()
-		return
+	session.lastActive.Store(time.Now().UnixNano())
+
+	// Forward UDP payload to the target via the proxy tunnel
+	if err := session.tunnelConn.WriteUDP(target, payload); err != nil {
+		log.V("[TUN UDP] Packet send failed: %v", err)
 	}
-	defer tunnelConn.Close()
-	defer conn.Close()
-
-	stopPing := tunnelConn.StartPing(10 * time.Second)
-	defer close(stopPing)
-
-	if err := tunnelConn.ConnectUDP(target, nil); err != nil {
-		log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
-		return
-	}
-
-	log.V("[TUN UDP] Connected: %s", target)
-
-	// wg ensures both goroutines finish before defers run (conn/tunnelConn.Close).
-	// Previously a bare channel <-done exited after the first goroutine signalled,
-	// leaving the second goroutine writing to already-closed connections.
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// TUN → tunnel
-	go func() {
-		defer wg.Done()
-		readBuf := buf.New()
-		defer readBuf.Release()
-		for {
-			readBuf.Reset()
-			addr, err := conn.ReadPacket(readBuf)
-			if err != nil {
-				tunnelConn.Close()
-				return
-			}
-			if err := tunnelConn.WriteUDP(addr.String(), readBuf.Bytes()); err != nil {
-				log.V("[TUN UDP] Packet send failed: %v", err)
-				conn.Close()
-				return
-			}
-		}
-	}()
-
-	// tunnel → TUN
-	// ReadUDPTo reads payload directly into the provided buffer; we wrap it in a pooled sing
-	// buffer (buf.New, not buf.NewSize) so WritePacket can return it to the pool.
-	go func() {
-		defer wg.Done()
-		for {
-			// Allocate from sing's fixed-size pool (better pool hit rate than NewSize).
-			writeBuf := buf.New()
-			n, err := tunnelConn.ReadUDPTo(writeBuf.FreeBytes())
-			if err != nil {
-				writeBuf.Release()
-				conn.Close()
-				return
-			}
-			writeBuf.Resize(0, n)
-			if err := conn.WritePacket(writeBuf, destination); err != nil {
-				writeBuf.Release()
-				log.V("[TUN UDP] Response write failed: %v", err)
-				tunnelConn.Close()
-				return
-			}
-			// On success WritePacket takes ownership; no Release needed here.
-		}
-	}()
-
-	wg.Wait()
-	log.V("[TUN UDP] Disconnected: %s", target)
 }
 
-// handleDNS reads DNS query packets from the TUN PacketConn in a loop,
-// resolves each through the TunnelDNSResolver (DoH via proxy tunnel), and writes
-// responses back. Each query is processed in a separate goroutine to allow
-// concurrent resolution. Pattern inspired by sing-box's NewDNSPacketConnection.
-func (h *Handler) handleDNS(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr) {
-	defer conn.Close()
+// udpReadLoop continuously reads UDP responses from the proxy tunnel and writes them back to the TUN Stack.
+func (h *Handler) udpReadLoop(srcKey string, session *udpSession, tunClientSrc netip.AddrPort) {
+	defer h.udpSessions.Delete(srcKey)
+	defer session.tunnelConn.Close()
 
-	// Read DNS packets in a loop (a single PacketConn may carry multiple queries)
-	for {
-		queryBuf := buf.New()
-		dest, err := conn.ReadPacket(queryBuf)
-		if err != nil {
-			queryBuf.Release()
-			return // connection closed or error
-		}
-
-		dnsQuery := make([]byte, queryBuf.Len())
-		copy(dnsQuery, queryBuf.Bytes())
-		queryBuf.Release()
-
-		if len(dnsQuery) < 12 {
-			log.V("[TUN DNS] Query too short (%d bytes), ignoring", len(dnsQuery))
-			continue
-		}
-
-		// Resolve each query concurrently (like sing-box's go func() pattern)
-		go func(query []byte, replyDest M.Socksaddr) {
-			response, err := h.dnsResolver.QueryRaw(ctx, query)
-			if err != nil {
-				log.Printf("[TUN DNS] Resolution failed: %v", err)
-				return
-			}
-
-			if len(response) == 0 {
-				log.Printf("[TUN DNS] Empty response")
-				return
-			}
-
-			// Write DNS response back to TUN
-			respBuf := buf.New()
-			_, _ = respBuf.Write(response)
-			if err := conn.WritePacket(respBuf, replyDest); err != nil {
-				respBuf.Release()
-				log.V("[TUN DNS] Failed to write response: %v", err)
-				return
-			}
-
-			log.V("[TUN DNS] Resolved: %d bytes", len(response))
-		}(dnsQuery, dest)
+	// Eagerly release the cached write-side conn when the session ends.
+	if h.udpWriter != nil && session.remoteAddr.IsValid() {
+		defer h.udpWriter.ReleaseConn(session.remoteAddr, tunClientSrc)
 	}
+
+	stopPing := session.tunnelConn.StartPing(10 * time.Second)
+	defer close(stopPing)
+
+	buf := commpool.GetLarge()
+	defer commpool.PutLarge(buf)
+
+	for {
+		n, err := session.tunnelConn.ReadUDPTo(buf)
+		if err != nil {
+			log.V("[TUN UDP] Session read loop closed for %s: %v", srcKey, err)
+			return
+		}
+
+		if h.udpWriter == nil || h.ctx.Err() != nil {
+			return
+		}
+
+		// Inject reply into gVisor:
+		//   src = remoteAddr  (packet appears to come FROM the remote server)
+		//   dst = tunClientSrc (packet is delivered TO the TUN client)
+		if session.remoteAddr.IsValid() {
+			if err := h.udpWriter.WriteTo(buf[:n], session.remoteAddr, tunClientSrc); err != nil {
+				log.V("[TUN UDP] Write to TUN failed: %v", err)
+			}
+		} else {
+			log.V("[TUN UDP] Dropping reply: remoteAddr not set for session %s", srcKey)
+		}
+	}
+}
+
+func (h *Handler) cleanupUDPSessions() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-5 * time.Minute).UnixNano()
+			h.udpSessions.Range(func(key, value interface{}) bool {
+				session := value.(*udpSession)
+				if session.lastActive.Load() < cutoff {
+					log.V("[TUN UDP] Cleaning up inactive NAT session: %s", key)
+					session.tunnelConn.Close()
+					h.udpSessions.Delete(key)
+				}
+				return true
+			})
+		}
+	}
+}
+
+func (h *Handler) handleDNS(query []byte, src netip.AddrPort, dst netip.AddrPort) {
+	if len(query) < 12 {
+		log.V("[TUN DNS] Query too short (%d bytes), ignoring", len(query))
+		return
+	}
+
+	go func(q []byte, tunClient netip.AddrPort, dnsServer netip.AddrPort) {
+		response, err := h.dnsResolver.QueryRaw(h.ctx, q)
+		if err != nil {
+			log.Printf("[TUN DNS] Resolution failed: %v", err)
+			return
+		}
+
+		if len(response) == 0 {
+			log.Printf("[TUN DNS] Empty response")
+			return
+		}
+
+		// Inject DNS reply into gVisor:
+		//   src = dnsServer  (packet appears to come FROM the DNS server)
+		//   dst = tunClient  (packet is delivered TO the TUN client app)
+		if h.udpWriter != nil && h.ctx.Err() == nil {
+			if err := h.udpWriter.WriteTo(response, dnsServer, tunClient); err != nil {
+				log.V("[TUN DNS] Failed to write response: %v", err)
+			} else {
+				log.V("[TUN DNS] Resolved: %d bytes", len(response))
+			}
+		}
+	}(query, src, dst)
 }

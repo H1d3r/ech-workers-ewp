@@ -34,7 +34,6 @@ type TunnelForwarder struct {
 	remote     net.Conn
 	flowState  *ewp.FlowState
 	bufferPool *sync.Pool
-	done       chan struct{}
 	enableFlow bool
 }
 
@@ -48,7 +47,6 @@ func NewTunnelForwarder(transport TransportAdapter, remote net.Conn, flowState *
 				return make([]byte, 32*1024)
 			},
 		},
-		done:       make(chan struct{}, 2),
 		enableFlow: flowState != nil,
 	}
 }
@@ -73,8 +71,6 @@ func (tf *TunnelForwarder) Forward() {
 }
 
 func (tf *TunnelForwarder) forwardUplink() {
-	defer func() { tf.done <- struct{}{} }()
-
 	for {
 		data, err := tf.transport.Read()
 		if err != nil {
@@ -100,8 +96,6 @@ func (tf *TunnelForwarder) forwardUplink() {
 }
 
 func (tf *TunnelForwarder) forwardDownlink() {
-	defer func() { tf.done <- struct{}{} }()
-
 	buf := tf.bufferPool.Get().([]byte)
 	defer tf.bufferPool.Put(buf)
 
@@ -136,13 +130,4 @@ func (tf *TunnelForwarder) forwardDownlink() {
 			return
 		}
 	}
-}
-
-func (tf *TunnelForwarder) Wait() <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		<-tf.done
-		close(done)
-	}()
-	return done
 }

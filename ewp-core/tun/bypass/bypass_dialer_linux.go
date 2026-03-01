@@ -1,6 +1,6 @@
 //go:build linux || android
 
-package tun
+package bypass
 
 import (
 	"net"

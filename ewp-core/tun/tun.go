@@ -5,86 +5,72 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
-	"time"
+	"sync"
 
 	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
+	ewpbypass "ewp-core/tun/bypass"
+	ewpgvisor "ewp-core/tun/gvisor"
+	tunsetup "ewp-core/tun/setup"
 
-	tun "github.com/sagernet/sing-tun"
-	"github.com/sagernet/sing/common/control"
-	"github.com/sagernet/sing/common/logger"
+	tun "golang.zx2c4.com/wireguard/tun"
 )
 
+type gvisorUDPWriter struct {
+	stack *ewpgvisor.Stack
+}
+
+func (w *gvisorUDPWriter) WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
+	if w.stack == nil {
+		return fmt.Errorf("stack is nil")
+	}
+	return w.stack.WriteUDP(p, src, dst)
+}
+
+func (w *gvisorUDPWriter) ReleaseConn(src netip.AddrPort, dst netip.AddrPort) {
+	if w.stack != nil {
+		w.stack.ReleaseWriteConn(src, dst)
+	}
+}
+
 type Config struct {
-	IP          string
-	DNS         string
-	IPv6        string
-	IPv6DNS     string
-	MTU         int
-	Stack       string
-	AutoRoute   bool
-	StrictRoute bool
-	Transport   transport.Transport
+	IP              string
+	DNS             string
+	IPv6            string
+	IPv6DNS         string
+	MTU             int
+	Stack           string
+	Transport       transport.Transport
+	ServerAddr      string // proxy server address; used to detect the physical outbound interface for bypass dialing
+	TunnelDoHServer string // DoH server URL for tunnel DNS resolver (default: https://dns.google/dns-query)
 }
 
 type TUN struct {
-	device           tun.Tun
-	stack            tun.Stack
-	handler          *Handler
-	config           *Config
-	ctx              context.Context
-	cancel           context.CancelFunc
-	networkMonitor   tun.NetworkUpdateMonitor
-	interfaceMonitor tun.DefaultInterfaceMonitor
+	device    tun.Device
+	stack     *ewpgvisor.Stack
+	handler   *Handler
+	config    *Config
+	ctx       context.Context
+	cancel    context.CancelFunc
+	ifName    string    // actual OS interface name returned by tun.Device.Name()
+	closeOnce sync.Once // ensures Close() is idempotent
 }
-
-type tunLogger struct{}
-
-func (l *tunLogger) Trace(args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Debug(args ...interface{}) { log.V("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Info(args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Warn(args ...interface{})  { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Error(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Fatal(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) Panic(args ...interface{}) { log.Printf("%s", fmt.Sprint(args...)) }
-func (l *tunLogger) TraceContext(ctx context.Context, args ...interface{}) {
-	log.V("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) DebugContext(ctx context.Context, args ...interface{}) {
-	log.V("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) InfoContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) WarnContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) ErrorContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) FatalContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-func (l *tunLogger) PanicContext(ctx context.Context, args ...interface{}) {
-	log.Printf("%s", fmt.Sprint(args...))
-}
-
-var _ logger.Logger = (*tunLogger)(nil)
 
 func New(cfg *Config) (*TUN, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	handler := NewHandler(ctx, cfg.Transport)
+	udpWriter := &gvisorUDPWriter{stack: nil}
+	handler := NewHandler(ctx, cfg.Transport, udpWriter)
 
-	// Wire tunnel DNS resolver: intercept DNS queries at port 53 and resolve
-	// through the proxy tunnel using DoH/DoT/DoQ (prevents DNS leaks).
-	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(cfg.Transport, dns.TunnelDNSConfig{})
+	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(cfg.Transport, dns.TunnelDNSConfig{
+		DoHServer: cfg.TunnelDoHServer,
+	})
 	if dnsErr != nil {
 		log.Printf("[TUN] Warning: tunnel DNS resolver init failed: %v (DNS will use generic UDP proxy)", dnsErr)
 	} else {
 		handler.SetDNSResolver(dnsResolver)
-		log.Printf("[TUN] Tunnel DNS resolver initialized (DoQ→DoH→DoT fallback)")
+		log.Printf("[TUN] Tunnel DNS resolver initialized (DoH server: %s)", dnsResolver.DoHServer())
 	}
 
 	mtu := uint32(cfg.MTU)
@@ -96,147 +82,91 @@ func New(cfg *Config) (*TUN, error) {
 	if !strings.Contains(ipStr, "/") {
 		ipStr += "/24"
 	}
-	inet4Addr, err := netip.ParsePrefix(ipStr)
+	_, err := netip.ParsePrefix(ipStr)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("parse IPv4 address failed: %w", err)
 	}
-	inet6Addrs := []netip.Prefix{}
-	if cfg.IPv6 != "" {
-		inet6Addr, err := netip.ParsePrefix(cfg.IPv6)
-		if err != nil {
-			log.Printf("[TUN] Warning: invalid IPv6 address %s: %v", cfg.IPv6, err)
-		} else {
-			inet6Addrs = append(inet6Addrs, inet6Addr)
-		}
-	}
 
-	dnsAddrs := []netip.Addr{}
-	if cfg.DNS != "" {
-		dnsAddr, err := netip.ParseAddr(cfg.DNS)
-		if err == nil {
-			dnsAddrs = append(dnsAddrs, dnsAddr)
-		}
-	}
-	if cfg.IPv6DNS != "" {
-		dns6Addr, err := netip.ParseAddr(cfg.IPv6DNS)
-		if err == nil {
-			dnsAddrs = append(dnsAddrs, dns6Addr)
-		}
-	}
-
-	stackName := cfg.Stack
-	if stackName == "" {
-		// Leave empty — sing-tun's NewStack("") auto-selects the optimal stack:
-		// "mixed" when gVisor is available (gVisor TCP + system UDP), which is
-		// more reliable than pure "system" stack on all platforms.
-		stackName = ""
-	}
-	cfg.Stack = stackName
-
-	tunLog := &tunLogger{}
-	interfaceFinder := control.NewDefaultInterfaceFinder()
-
-	networkMonitor, err := tun.NewNetworkUpdateMonitor(tunLog)
+	tunDevice, err := tun.CreateTUN("ewp-tun", int(mtu))
 	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("create network monitor failed: %w", err)
-	}
-	if err := networkMonitor.Start(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("start network monitor failed: %w", err)
-	}
-
-	interfaceMonitor, err := tun.NewDefaultInterfaceMonitor(networkMonitor, tunLog, tun.DefaultInterfaceMonitorOptions{
-		InterfaceFinder: interfaceFinder,
-	})
-	if err != nil {
-		networkMonitor.Close()
-		cancel()
-		return nil, fmt.Errorf("create interface monitor failed: %w", err)
-	}
-	if err := interfaceMonitor.Start(); err != nil {
-		networkMonitor.Close()
-		cancel()
-		return nil, fmt.Errorf("start interface monitor failed: %w", err)
-	}
-
-	tunOptions := tun.Options{
-		Name:             "ewp-tun",
-		Inet4Address:     []netip.Prefix{inet4Addr},
-		Inet6Address:     inet6Addrs,
-		MTU:              mtu,
-		AutoRoute:        cfg.AutoRoute,
-		StrictRoute:      cfg.StrictRoute,
-		DNSServers:       dnsAddrs,
-		InterfaceFinder:  interfaceFinder,
-		InterfaceMonitor: interfaceMonitor,
-		Logger:           tunLog,
-	}
-
-	tunDevice, err := tun.New(tunOptions)
-	if err != nil {
-		interfaceMonitor.Close()
-		networkMonitor.Close()
 		cancel()
 		return nil, fmt.Errorf("create TUN device failed: %w", err)
 	}
 
-	stackOptions := tun.StackOptions{
-		Context:         ctx,
-		Tun:             tunDevice,
-		TunOptions:      tunOptions,
-		Handler:         handler,
-		Logger:          tunLog,
-		UDPTimeout:      5 * time.Minute,
-		InterfaceFinder: interfaceFinder,
+	stackConfig := &ewpgvisor.StackConfig{
+		MTU:        int(mtu),
+		TCPHandler: handler.HandleTCP,
+		UDPHandler: handler.HandleUDP,
 	}
 
-	stack, err := tun.NewStack(stackName, stackOptions)
+	stack, err := ewpgvisor.NewStack(tunDevice, stackConfig)
 	if err != nil {
-		// Auto-fallback: if gVisor/mixed fails because it's not compiled in, retry with system stack
-		if stackName != "system" && strings.Contains(err.Error(), "gVisor is not included") {
-			log.Printf("[TUN] %s stack unavailable (gVisor not compiled), falling back to system stack", stackName)
-			stack, err = tun.NewStack("system", stackOptions)
-		}
-		if err != nil {
-			tunDevice.Close()
-			interfaceMonitor.Close()
-			networkMonitor.Close()
-			cancel()
-			return nil, fmt.Errorf("create stack failed: %w", err)
-		}
+		tunDevice.Close()
+		cancel()
+		return nil, fmt.Errorf("create gvisor stack failed: %w", err)
 	}
+
+	udpWriter.stack = stack
 
 	return &TUN{
-		device:           tunDevice,
-		stack:            stack,
-		handler:          handler,
-		config:           cfg,
-		ctx:              ctx,
-		cancel:           cancel,
-		networkMonitor:   networkMonitor,
-		interfaceMonitor: interfaceMonitor,
+		device:  tunDevice,
+		stack:   stack,
+		handler: handler,
+		config:  cfg,
+		ctx:     ctx,
+		cancel:  cancel,
 	}, nil
 }
 
+// Setup configures the OS network interface and routing table, then injects
+// a bypass dialer into the transport so proxy connections don't loop through
+// the TUN device.
+//
+// MUST be called after New() and BEFORE Start(). The bypass dialer is created
+// first (while the physical default route is still in place), then the TUN
+// routes are added — this ordering is critical to correctly identify the
+// physical outbound interface.
+func (t *TUN) Setup() error {
+	ifName, err := t.device.Name()
+	if err != nil {
+		return fmt.Errorf("get TUN interface name: %w", err)
+	}
+	t.ifName = ifName
+	log.Printf("[TUN] Interface name: %s", ifName)
+
+	// Step 1 — bypass dialer BEFORE route changes.
+	// NewBypassDialer probes the current routing table (UDP connect to server IP)
+	// to detect the physical outbound interface. This must happen before we add
+	// the TUN default route, otherwise the probe would pick the TUN itself.
+	if t.config.ServerAddr != "" {
+		bd, err := ewpbypass.NewBypassDialer(t.config.ServerAddr)
+		if err != nil {
+			log.Printf("[TUN] Warning: bypass dialer init failed: %v (routing loop risk)", err)
+		} else {
+			t.config.Transport.SetBypassConfig(bd.ToBypassConfig())
+			log.Printf("[TUN] Bypass dialer active on interface %s", ifName)
+		}
+	} else {
+		log.Printf("[TUN] Warning: ServerAddr not set — bypass dialer disabled, routing loop possible")
+	}
+
+	// Step 2 — assign IP address and add default routes through the TUN.
+	mtu := t.config.MTU
+	if mtu <= 0 {
+		mtu = 1500
+	}
+	if err := tunsetup.SetupTUN(ifName, t.config.IP, t.config.IPv6, t.config.DNS, t.config.IPv6DNS, mtu); err != nil {
+		return fmt.Errorf("configure TUN network: %w", err)
+	}
+
+	log.Printf("[TUN] Network configured: interface=%s IPv4=%s IPv6=%s MTU=%d",
+		ifName, t.config.IP, t.config.IPv6, mtu)
+	return nil
+}
+
 func (t *TUN) Start() error {
-	// CRITICAL: Start the TUN device first — this registers the interface with
-	// the OS monitor and, when AutoRoute is enabled, adds routes to the routing
-	// table (gateway, 0.0.0.0/0 etc.) and sets up WFP firewall rules on Windows.
-	// Without this call the TUN NIC has no gateway and traffic stays on the
-	// physical adapter.
-	if err := t.device.Start(); err != nil {
-		return fmt.Errorf("start TUN device failed: %w", err)
-	}
-
-	// Then start the network stack (TCP NAT listeners / gVisor endpoint / etc.)
-	if err := t.stack.Start(); err != nil {
-		return fmt.Errorf("start stack failed: %w", err)
-	}
-
-	log.Printf("[TUN] TUN mode started (stack=%s, auto_route=%v, strict_route=%v)",
-		t.config.Stack, t.config.AutoRoute, t.config.StrictRoute)
+	log.Printf("[TUN] TUN mode started (stack=%s)", t.config.Stack)
 	log.Printf("[TUN] IPv4: %s", t.config.IP)
 	if t.config.IPv6 != "" {
 		log.Printf("[TUN] IPv6: %s", t.config.IPv6)
@@ -248,28 +178,32 @@ func (t *TUN) Start() error {
 }
 
 func (t *TUN) Close() error {
-	log.Printf("[TUN] Stopping TUN mode...")
+	var closeErr error
+	t.closeOnce.Do(func() {
+		log.Printf("[TUN] Stopping TUN mode...")
 
-	if t.cancel != nil {
-		t.cancel()
-	}
+		if t.cancel != nil {
+			t.cancel()
+		}
 
-	if t.stack != nil {
-		t.stack.Close()
-	}
+		if t.stack != nil {
+			t.stack.Close()
+		}
 
-	if t.device != nil {
-		t.device.Close()
-	}
+		// Close the underlying TUN device (releases Wintun handle on Windows,
+		// fd on Linux/macOS). Must come after stack.Close() so gVisor stops
+		// reading from the device before we destroy it.
+		if t.device != nil {
+			t.device.Close()
+		}
 
-	if t.interfaceMonitor != nil {
-		t.interfaceMonitor.Close()
-	}
+		if t.ifName != "" {
+			if err := tunsetup.TeardownTUN(t.ifName); err != nil {
+				log.Printf("[TUN] Teardown warning: %v", err)
+			}
+		}
 
-	if t.networkMonitor != nil {
-		t.networkMonitor.Close()
-	}
-
-	log.Printf("[TUN] TUN mode stopped")
-	return nil
+		log.Printf("[TUN] TUN mode stopped")
+	})
+	return closeErr
 }

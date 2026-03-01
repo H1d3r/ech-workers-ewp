@@ -73,8 +73,8 @@ func (h *trojanUDPHandler) handleStream(reader io.Reader, done chan struct{}) {
 		}
 
 		// Read CRLF
-		crlfBuf := make([]byte, 2)
-		if _, err := io.ReadFull(reader, crlfBuf); err != nil {
+		var crlfBuf [2]byte
+		if _, err := io.ReadFull(reader, crlfBuf[:]); err != nil {
 			log.Warn("Trojan UDP read CRLF error: %v", err)
 			return
 		}

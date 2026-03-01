@@ -18,6 +18,7 @@ import (
 	"ewp-core/transport/websocket"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
+	"ewp-core/tun/util"
 )
 
 func main() {
@@ -252,7 +253,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *option.RootConfig) {
 	log.Info("Starting TUN mode...")
 
-	if !tun.IsAdmin() {
+	if !util.IsAdmin() {
 		log.Fatalf("TUN mode requires administrator privileges")
 	}
 
@@ -288,27 +289,16 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 
 	log.Info("TUN DNS: IPv4=%s, IPv6=%s", dnsServer, dns6Server)
 
-	// Create bypass dialer BEFORE starting TUN so that the physical interface
-	// can be detected while the routing table is still unmodified.
-	// This prevents routing loops: the transport's outgoing TCP/UDP sockets
-	// will be bound to the physical interface and bypass the TUN device.
-	bypassDialer, bdErr := tun.NewBypassDialer(cfg.Outbounds[0].Server)
-	if bdErr != nil {
-		log.Printf("[TUN] Warning: bypass dialer unavailable (%v) — routing loops may occur", bdErr)
-	} else {
-		trans.SetBypassConfig(bypassDialer.ToBypassConfig())
-	}
-
 	tunCfg := &tun.Config{
-		IP:          tunIP,
-		DNS:         dnsServer,
-		IPv6:        tunIPv6,
-		IPv6DNS:     dns6Server,
-		MTU:         mtu,
-		Stack:       inbound.Stack,
-		AutoRoute:   inbound.AutoRoute,
-		StrictRoute: inbound.StrictRoute,
-		Transport:   trans,
+		IP:              tunIP,
+		DNS:             dnsServer,
+		IPv6:            tunIPv6,
+		IPv6DNS:         dns6Server,
+		MTU:             mtu,
+		Stack:           inbound.Stack,
+		Transport:       trans,
+		ServerAddr:      cfg.Outbounds[0].Server,
+		TunnelDoHServer: inbound.TunnelDoHServer,
 	}
 
 	tunDev, err := tun.New(tunCfg)
@@ -316,6 +306,15 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 		log.Fatalf("TUN initialization failed: %v", err)
 	}
 	defer tunDev.Close()
+
+	// Setup MUST be called before Start():
+	// 1. detects the physical outbound interface and installs a bypass dialer on
+	//    the transport (while the physical default route is still in place)
+	// 2. assigns the TUN IP address and adds the default 0.0.0.0/0 route through
+	//    the TUN device (which would redirect the probe in step 1 if done first)
+	if err := tunDev.Setup(); err != nil {
+		log.Fatalf("TUN setup failed: %v", err)
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

@@ -66,13 +66,14 @@ QJsonObject ConfigGenerator::generateInbound(const SettingsDialog::AppSettings &
         inbound["strict_route"] = settings.tunStrictRoute;
         inbound["stack"] = settings.tunStack;
         
-        // TUN mode DNS - IPv4 and IPv6
         if (!settings.tunnelDNS.isEmpty()) {
             inbound["dns"] = settings.tunnelDNS.trimmed();
         }
-        
         if (!settings.tunnelDNSv6.isEmpty()) {
             inbound["ipv6_dns"] = settings.tunnelDNSv6.trimmed();
+        }
+        if (!settings.tunnelDoHServer.isEmpty()) {
+            inbound["tunnel_doh_server"] = settings.tunnelDoHServer.trimmed();
         }
     } else {
         inbound["type"] = "mixed";

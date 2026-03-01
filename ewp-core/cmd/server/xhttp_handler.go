@@ -346,24 +346,21 @@ func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID stri
 		close(session.isFullyConnected)
 	})
 	defer xhttpSessions.Delete(sessionID)
+	defer session.remote.Close()
+	defer session.uploadQueue.Close() // wakes up the upload consumer on exit
 
 	go func() {
 		buf := largeBufferPool.Get().([]byte)
 		defer largeBufferPool.Put(buf)
 		for {
-			select {
-			case <-session.done:
-				return
-			default:
-				n, err := session.uploadQueue.Read(buf)
-				if n > 0 {
-					if _, e := session.remote.Write(buf[:n]); e != nil {
-						return
-					}
-				}
-				if err != nil {
+			n, err := session.uploadQueue.Read(buf)
+			if n > 0 {
+				if _, e := session.remote.Write(buf[:n]); e != nil {
 					return
 				}
+			}
+			if err != nil {
+				return
 			}
 		}
 	}()

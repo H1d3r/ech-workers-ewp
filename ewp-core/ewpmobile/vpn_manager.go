@@ -1,3 +1,5 @@
+//go:build android
+
 package ewpmobile
 
 import (
@@ -5,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,10 +21,27 @@ import (
 	"ewp-core/transport/websocket"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
+	ewpgvisor "ewp-core/tun/gvisor"
 
-	"github.com/sagernet/sing/common/control"
-	singtun "github.com/sagernet/sing-tun"
+	wgtun "golang.zx2c4.com/wireguard/tun"
 )
+
+type gvisorUDPWriter struct {
+	stack *ewpgvisor.Stack
+}
+
+func (w *gvisorUDPWriter) WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
+	if w.stack == nil {
+		return fmt.Errorf("stack is nil")
+	}
+	return w.stack.WriteUDP(p, src, dst)
+}
+
+func (w *gvisorUDPWriter) ReleaseConn(src netip.AddrPort, dst netip.AddrPort) {
+	if w.stack != nil {
+		w.stack.ReleaseWriteConn(src, dst)
+	}
+}
 
 // vpnManager 统一的 VPN 管理器，集成连接和 TUN 功能
 type vpnManager struct {
@@ -36,8 +56,8 @@ type vpnManager struct {
 	// TUN 相关
 	tunFD      int
 	tunMTU     int
-	tunDevice  singtun.Tun
-	tunStack   singtun.Stack
+	tunDevice  wgtun.Device
+	tunStack   *ewpgvisor.Stack
 	tunHandler *tun.Handler
 
 	// 配置
@@ -140,6 +160,9 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		}
 
 		echMgr = tls.NewECHManager(echDomain, dnsServer)
+		if IsSocketProtectorSet() {
+			echMgr.SetBypassDialer(makeProtectedBypassConfig().TCPDialer)
+		}
 		if err := echMgr.Refresh(); err != nil {
 			log.Printf("[VPNManager] ECH initialization failed: %v, falling back to plain TLS", err)
 			config.EnableECH = false
@@ -268,9 +291,12 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		log.Printf("[VPNManager] Warning: No socket protector - transport may loop through TUN")
 	}
 
-	// 4. 创建 TUN 处理器
+	// 4. 初始化 TUN 处理器与 DNS 接管
 	log.Printf("[VPNManager] Creating TUN handler...")
-	vm.tunHandler = tun.NewHandler(ctx, vm.transport)
+
+	// We prepare the udp writer interface ahead of time, pointing to the stack pointer later.
+	udpWriter := &gvisorUDPWriter{stack: nil}
+	vm.tunHandler = tun.NewHandler(ctx, vm.transport, udpWriter)
 
 	// Wire tunnel DNS resolver (DoQ→DoH→DoT fallback through proxy tunnel)
 	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(vm.transport, dns.TunnelDNSConfig{})
@@ -281,119 +307,38 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		log.Printf("[VPNManager] Tunnel DNS resolver initialized")
 	}
 
-	// 5. 配置 TUN 选项
-	ip := config.TunIP
-	if ip == "" {
-		ip = "10.0.0.2"
-	}
-	dns := config.TunDNS
-	if dns == "" {
-		dns = "8.8.8.8"
-	}
-
-	inet4Addr, err := netip.ParsePrefix(ip + "/24")
-	if err != nil {
-		cancel()
-		return fmt.Errorf("parse IP address failed: %w", err)
-	}
-
-	dnsAddr, err := netip.ParseAddr(dns)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("parse DNS address failed: %w", err)
-	}
-
-	tunLog := &ewpLogger{}
-	interfaceFinder := control.NewDefaultInterfaceFinder()
-
-	// Create network monitor + interface monitor (required by sing-tun device.Start())
-	networkMonitor, err := singtun.NewNetworkUpdateMonitor(tunLog)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("create network monitor failed: %w", err)
-	}
-	if err := networkMonitor.Start(); err != nil {
-		cancel()
-		return fmt.Errorf("start network monitor failed: %w", err)
-	}
-
-	interfaceMonitor, err := singtun.NewDefaultInterfaceMonitor(networkMonitor, tunLog, singtun.DefaultInterfaceMonitorOptions{
-		InterfaceFinder: interfaceFinder,
-	})
-	if err != nil {
-		networkMonitor.Close()
-		cancel()
-		return fmt.Errorf("create interface monitor failed: %w", err)
-	}
-	if err := interfaceMonitor.Start(); err != nil {
-		networkMonitor.Close()
-		cancel()
-		return fmt.Errorf("start interface monitor failed: %w", err)
-	}
-
-	tunOptions := singtun.Options{
-		Name:             "ewp-vpn",
-		Inet4Address:     []netip.Prefix{inet4Addr},
-		MTU:              uint32(vm.tunMTU),
-		AutoRoute:        false, // Android VPNService handles routing
-		DNSServers:       []netip.Addr{dnsAddr},
-		FileDescriptor:   tunFD,
-		InterfaceFinder:  interfaceFinder,
-		InterfaceMonitor: interfaceMonitor,
-		Logger:           tunLog,
-	}
-
-	// 6. 创建 TUN 设备
+	// 6. 创建 TUN 设备 (Android FileDescriptor)
 	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)
-	vm.tunDevice, err = singtun.New(tunOptions)
+	
+	// Create raw wireguard-tun device from the file descriptor handed to us by VpnService Builder
+	file := os.NewFile(uintptr(tunFD), "tun")
+	if file == nil {
+		cancel()
+		return fmt.Errorf("create os.File from TUN FD %d failed", tunFD)
+	}
+
+	tunDevice, err := wgtun.CreateTUNFromFile(file, vm.tunMTU)
 	if err != nil {
-		interfaceMonitor.Close()
-		networkMonitor.Close()
 		cancel()
 		return fmt.Errorf("create TUN device failed: %w", err)
 	}
+	vm.tunDevice = tunDevice
 
-	// Start the TUN device (registers interface with OS monitor)
-	if err := vm.tunDevice.Start(); err != nil {
-		vm.tunDevice.Close()
-		interfaceMonitor.Close()
-		networkMonitor.Close()
-		cancel()
-		return fmt.Errorf("start TUN device failed: %w", err)
-	}
-
-	// 7. 创建网络栈 (use gvisor stack — handles TCP/UDP entirely in userspace,
-	// more reliable on Android where system stack's TCP NAT may not work with VPNService)
+	// 7. 创建网络栈 (use gvisor stack)
 	log.Printf("[VPNManager] Creating network stack (gvisor)...")
-	stackOptions := singtun.StackOptions{
-		Context:         ctx,
-		Tun:             vm.tunDevice,
-		TunOptions:      tunOptions,
-		Handler:         vm.tunHandler,
-		Logger:          tunLog,
-		UDPTimeout:      5 * time.Minute,
-		InterfaceFinder: interfaceFinder,
+	stackConfig := &ewpgvisor.StackConfig{
+		MTU:        vm.tunMTU,
+		TCPHandler: vm.tunHandler.HandleTCP,
+		UDPHandler: vm.tunHandler.HandleUDP,
 	}
 
-	vm.tunStack, err = singtun.NewStack("gvisor", stackOptions)
+	vm.tunStack, err = ewpgvisor.NewStack(vm.tunDevice, stackConfig)
 	if err != nil {
 		vm.tunDevice.Close()
-		interfaceMonitor.Close()
-		networkMonitor.Close()
 		cancel()
-		return fmt.Errorf("create network stack failed: %w", err)
+		return fmt.Errorf("create gvisor stack failed: %w", err)
 	}
-
-	// 8. 启动网络栈
-	log.Printf("[VPNManager] Starting network stack...")
-	if err := vm.tunStack.Start(); err != nil {
-		vm.tunStack.Close()
-		vm.tunDevice.Close()
-		interfaceMonitor.Close()
-		networkMonitor.Close()
-		cancel()
-		return fmt.Errorf("start network stack failed: %w", err)
-	}
+	udpWriter.stack = vm.tunStack
 
 	vm.running = true
 	vm.startTime = time.Now()

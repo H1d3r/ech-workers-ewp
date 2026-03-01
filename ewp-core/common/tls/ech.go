@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -22,6 +23,16 @@ type ECHManager struct {
 	dnsClient *dns.Client
 	stopClean chan struct{}
 	cleanOnce sync.Once
+}
+
+// SetBypassDialer replaces the internal DoH client with one that uses the provided
+// dialer for all TCP connections. Call this before the first Refresh() when running
+// in TUN mode so that the initial ECH fetch bypasses the TUN device and avoids a
+// bootstrap deadlock (tunnel not yet established → cannot proxy the DoH request).
+func (m *ECHManager) SetBypassDialer(d *net.Dialer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dnsClient = dns.NewClientWithDialer(m.dnsServer, d)
 }
 
 // NewECHManager creates a new ECH manager with 1-hour cache TTL
@@ -54,8 +65,11 @@ func NewECHManagerWithTTL(domain, dnsServer string, ttl time.Duration) *ECHManag
 func (m *ECHManager) Refresh() error {
 	echlog.Printf("[ECH] Refreshing configuration...")
 
-	// Query HTTPS record for ECH
-	echBase64, err := m.dnsClient.QueryHTTPS(m.domain)
+	m.mu.RLock()
+	client := m.dnsClient
+	m.mu.RUnlock()
+
+	echBase64, err := client.QueryHTTPS(m.domain)
 	if err != nil {
 		return fmt.Errorf("DNS query failed: %w", err)
 	}

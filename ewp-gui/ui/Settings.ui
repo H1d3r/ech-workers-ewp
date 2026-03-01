@@ -159,6 +159,34 @@
         </item>
        </layout>
       </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="labelTunnelDoHServer">
+        <property name="text">
+         <string>DoH 解析服务器</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <layout class="QVBoxLayout">
+        <item>
+         <widget class="QLineEdit" name="editTunnelDoHServer">
+          <property name="placeholderText">
+           <string>dns.google/dns-query（留空使用默认，https:// 可省略）</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelTunnelDoHServerHint">
+          <property name="text">
+           <string>DNS 查询通过代理隧道发往此 DoH 服务器</string>
+          </property>
+          <property name="styleSheet">
+           <string>color: gray; font-size: 10px;</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
      </layout>
     </widget>
    </item>

@@ -23,6 +23,7 @@ public:
         // TUN DNS settings
         QString tunnelDNS;
         QString tunnelDNSv6;
+        QString tunnelDoHServer; // DoH server URL for DNS-over-tunnel
         
         // TUN settings
         QString tunIP;

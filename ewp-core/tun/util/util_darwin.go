@@ -1,6 +1,6 @@
 //go:build darwin
 
-package tun
+package util
 
 import (
 	"net"
