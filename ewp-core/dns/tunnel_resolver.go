@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -153,11 +156,18 @@ func (r *TunnelDNSResolver) QueryRaw(ctx context.Context, dnsQuery []byte) ([]by
 // doHTTPSQuery performs a single DoH query through the proxy tunnel.
 func (r *TunnelDNSResolver) doHTTPSQuery(ctx context.Context, dnsQuery []byte) ([]byte, error) {
 	// Dial tunnel
-	conn, err := r.transport.Dial()
+	tunnelConn, err := r.transport.Dial()
 	if err != nil {
 		return nil, fmt.Errorf("tunnel dial failed: %w", err)
 	}
-	defer conn.Close()
+
+	// Wait to close the connection only if it's not handed to http.Client
+	connClosed := false
+	defer func() {
+		if !connClosed {
+			tunnelConn.Close()
+		}
+	}()
 
 	// Parse DoH URL
 	u, err := url.Parse(r.dohServer)
@@ -165,114 +175,83 @@ func (r *TunnelDNSResolver) doHTTPSQuery(ctx context.Context, dnsQuery []byte) (
 		return nil, fmt.Errorf("invalid DoH URL: %w", err)
 	}
 
-	// Connect tunnel to DoH server
 	targetHost := u.Hostname()
 	targetPort := u.Port()
 	if targetPort == "" {
-		targetPort = "443"
+		if u.Scheme == "https" {
+			targetPort = "443"
+		} else {
+			targetPort = "80"
+		}
 	}
 	target := net.JoinHostPort(targetHost, targetPort)
 
-	if err := conn.Connect(target, nil); err != nil {
+	// Connect proxy to DoH server
+	if err := tunnelConn.Connect(target, nil); err != nil {
 		return nil, fmt.Errorf("tunnel connect to %s failed: %w", target, err)
 	}
 
-	// Build HTTP POST request (RFC 8484)
-	path := u.Path
-	if path == "" {
-		path = "/dns-query"
-	}
-	httpReq := fmt.Sprintf(
-		"POST %s HTTP/1.1\r\nHost: %s\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-		path, u.Hostname(), len(dnsQuery),
-	)
+	var netConn net.Conn = &tunnelConnAdapter{TunnelConn: tunnelConn}
 
-	// Send request
-	if err := conn.Write([]byte(httpReq)); err != nil {
-		return nil, fmt.Errorf("send request failed: %w", err)
-	}
-	if err := conn.Write(dnsQuery); err != nil {
-		return nil, fmt.Errorf("send query body failed: %w", err)
-	}
-
-	// Read full response (may come in multiple reads)
-	var responseBuf bytes.Buffer
-	readBuf := make([]byte, 4096)
-	for {
-		n, err := conn.Read(readBuf)
-		if n > 0 {
-			responseBuf.Write(readBuf[:n])
+	// If HTTPS, wrap with TLS
+	if u.Scheme == "https" {
+		tlsConfig := &tls.Config{
+			ServerName: targetHost,
 		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			// If we already have data, try to parse it
-			if responseBuf.Len() > 0 {
-				break
-			}
-			return nil, fmt.Errorf("read response failed: %w", err)
+		tlsConn := tls.Client(&tunnelConnAdapter{TunnelConn: tunnelConn}, tlsConfig)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return nil, fmt.Errorf("TLS handshake to DoH server failed: %w", err)
 		}
-		// Check if we have the complete HTTP response
-		if parseComplete(responseBuf.Bytes()) {
-			break
+		netConn = tlsConn
+	}
+
+	// We pass the ownership of netConn to the http transport
+	connClosed = true
+
+	// Custom HTTP Client using the established tunnel (and TLS)
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return netConn, nil
+		},
+		DisableKeepAlives: true,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   r.timeout,
+	}
+
+	// Build DoH POST request
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.dohServer, bytes.NewReader(dnsQuery))
+	if err != nil {
+		netConn.Close()
+		return nil, fmt.Errorf("create HTTP request failed: %w", err)
+	}
+	req.Header.Set("Accept", "application/dns-message")
+	req.Header.Set("Content-Type", "application/dns-message")
+
+	// Execute DoH request
+	resp, err := client.Do(req)
+	if err != nil {
+		// client.Do automatically closes the netConn on failure if dial returns it but errors out later
+		if !errors.Is(err, net.ErrClosed) {
+			netConn.Close()
 		}
+		return nil, fmt.Errorf("HTTP DoH request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("DoH HTTP error: %s", resp.Status)
 	}
 
-	if responseBuf.Len() == 0 {
-		return nil, fmt.Errorf("empty response from DoH server")
+	// Read response body natively
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body failed: %w", err)
 	}
 
-	// Parse HTTP response to extract DNS message
-	return parseHTTPResponse(responseBuf.Bytes())
-}
-
-// parseComplete checks if the HTTP response is complete.
-func parseComplete(data []byte) bool {
-	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
-	if headerEnd == -1 {
-		return false
-	}
-
-	// Look for Content-Length
-	headers := string(data[:headerEnd])
-	body := data[headerEnd+4:]
-
-	// Simple Content-Length check
-	clIdx := bytes.Index([]byte(headers), []byte("Content-Length: "))
-	if clIdx != -1 {
-		clLine := headers[clIdx+16:]
-		endIdx := bytes.IndexByte([]byte(clLine), '\r')
-		if endIdx == -1 {
-			endIdx = len(clLine)
-		}
-		var cl int
-		fmt.Sscanf(clLine[:endIdx], "%d", &cl)
-		return len(body) >= cl
-	}
-
-	// For Connection: close responses, we'll rely on EOF
-	// But if we have body data, consider it potentially complete
-	return len(body) > 12 // DNS response is at least 12 bytes
-}
-
-// parseHTTPResponse extracts DNS message from HTTP response.
-func parseHTTPResponse(httpResponse []byte) ([]byte, error) {
-	headerEnd := bytes.Index(httpResponse, []byte("\r\n\r\n"))
-	if headerEnd == -1 {
-		return nil, fmt.Errorf("invalid HTTP response: no header end")
-	}
-
-	// Check status code
-	statusLine := bytes.SplitN(httpResponse[:headerEnd], []byte("\r\n"), 2)[0]
-	if !bytes.Contains(statusLine, []byte("200")) {
-		return nil, fmt.Errorf("DoH HTTP error: %s", statusLine)
-	}
-
-	// Extract body (DNS message)
-	body := httpResponse[headerEnd+4:]
 	if len(body) == 0 {
-		return nil, fmt.Errorf("empty response body")
+		return nil, fmt.Errorf("empty response from DoH server")
 	}
 
 	return body, nil
@@ -297,5 +276,39 @@ func (r *TunnelDNSResolver) ClearCache() {
 
 // Close releases resources.
 func (r *TunnelDNSResolver) Close() error {
+	return nil
+}
+
+// tunnelConnAdapter wraps a transport.TunnelConn to implement net.Conn
+// This is required to pass the tunnel connection to tls.Client and http.Transport
+type tunnelConnAdapter struct {
+	transport.TunnelConn
+}
+
+func (a *tunnelConnAdapter) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+func (a *tunnelConnAdapter) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+func (a *tunnelConnAdapter) Write(b []byte) (n int, err error) {
+	err = a.TunnelConn.Write(b)
+	if err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
+func (a *tunnelConnAdapter) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (a *tunnelConnAdapter) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (a *tunnelConnAdapter) SetWriteDeadline(t time.Time) error {
 	return nil
 }

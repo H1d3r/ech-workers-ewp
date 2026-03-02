@@ -32,8 +32,12 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 			return fmt.Errorf("netsh set MTU: %w", err)
 		}
 		if err := run("netsh", "interface", "ipv4", "add", "route",
-			"0.0.0.0/0", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
-			return fmt.Errorf("netsh add IPv4 default route: %w", err)
+			"0.0.0.0/1", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
+			return fmt.Errorf("netsh add IPv4 route 0.0.0.0/1: %w", err)
+		}
+		if err := run("netsh", "interface", "ipv4", "add", "route",
+			"128.0.0.0/1", ifName, "nexthop="+gw, "metric=1", "store=active"); err != nil {
+			return fmt.Errorf("netsh add IPv4 route 128.0.0.0/1: %w", err)
 		}
 	}
 
@@ -59,8 +63,12 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 			return fmt.Errorf("netsh set IPv6 address: %w", err)
 		}
 		if err := run("netsh", "interface", "ipv6", "add", "route",
-			"::/0", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
-			return fmt.Errorf("netsh add IPv6 default route: %w", err)
+			"::/1", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
+			return fmt.Errorf("netsh add IPv6 route ::/1: %w", err)
+		}
+		if err := run("netsh", "interface", "ipv6", "add", "route",
+			"8000::/1", ifName, "nexthop="+gw6, "metric=1", "store=active"); err != nil {
+			return fmt.Errorf("netsh add IPv6 route 8000::/1: %w", err)
 		}
 	}
 
@@ -75,8 +83,10 @@ func SetupTUN(ifName, ipCIDR, ipv6CIDR, dns, ipv6DNS string, mtu int) error {
 }
 
 func TeardownTUN(ifName string) error {
-	_ = run("netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/0", ifName)
-	_ = run("netsh", "interface", "ipv6", "delete", "route", "::/0", ifName)
+	_ = run("netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/1", ifName)
+	_ = run("netsh", "interface", "ipv4", "delete", "route", "128.0.0.0/1", ifName)
+	_ = run("netsh", "interface", "ipv6", "delete", "route", "::/1", ifName)
+	_ = run("netsh", "interface", "ipv6", "delete", "route", "8000::/1", ifName)
 	return nil
 }
 
