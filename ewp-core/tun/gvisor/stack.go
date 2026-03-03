@@ -91,6 +91,14 @@ func NewStack(tunDev tun.Device, config *StackConfig) (*Stack, error) {
 		},
 	})
 
+	// Enable Promiscuous mode and Spoofing to allow transparent proxying and return traffic
+	if err := ipStack.SetPromiscuousMode(nicID, true); err != nil {
+		return nil, fmt.Errorf("set promiscuous mode: %v", err)
+	}
+	if err := ipStack.SetSpoofing(nicID, true); err != nil {
+		return nil, fmt.Errorf("set spoofing: %v", err)
+	}
+
 	s := &Stack{
 		ipStack:   ipStack,
 		tunDev:    tunDev,
