@@ -71,15 +71,18 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 	var target string
 	if h.fakeIPPool != nil {
 		dstIP, _ := netip.AddrFromSlice(dstAddr.IP)
+		dstIP = dstIP.Unmap() // convert ::ffff:198.18.x.x → 198.18.x.x
 		if domain, ok := h.fakeIPPool.LookupByIP(dstIP); ok {
 			target = net.JoinHostPort(domain, fmt.Sprint(dstAddr.Port))
-			log.V("[TUN TCP] FakeIP reverse: %s -> %s", dstAddr, target)
+			log.Printf("[TUN TCP] FakeIP reverse: %s -> %s", dstAddr, target)
+		} else if h.fakeIPPool.IsFakeIP(dstIP) {
+			log.Printf("[TUN TCP] WARNING: FakeIP %s has no mapping!", dstIP)
 		}
 	}
 	if target == "" {
 		target = dstAddr.String()
 	}
-	log.V("[TUN TCP] New connection: %s -> %s", srcAddr, target)
+	log.Printf("[TUN TCP] New connection: %s -> %s", srcAddr, target)
 
 	tunnelConn, err := h.transport.Dial()
 	if err != nil {
@@ -158,9 +161,10 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 	// Reverse-lookup fake IP to domain for UDP endpoint
 	var endpoint transport.Endpoint
 	if h.fakeIPPool != nil {
-		if domain, ok := h.fakeIPPool.LookupByIP(dst.Addr()); ok {
+		unmapped := dst.Addr().Unmap()
+		if domain, ok := h.fakeIPPool.LookupByIP(unmapped); ok {
 			endpoint = transport.Endpoint{Domain: domain, Port: dst.Port()}
-			log.V("[TUN UDP] FakeIP reverse: %s -> %s:%d", dst, domain, dst.Port())
+			log.Printf("[TUN UDP] FakeIP reverse: %s -> %s:%d", dst, domain, dst.Port())
 		}
 	}
 	if endpoint.Domain == "" && !endpoint.Addr.IsValid() {
@@ -347,9 +351,9 @@ func (h *Handler) handleDNSFakeIP(query []byte, src netip.AddrPort, dst netip.Ad
 	// Write response back to TUN (src=DNS server, dst=querying app)
 	if h.udpWriter != nil && h.ctx.Err() == nil {
 		if err := h.udpWriter.WriteTo(response, dst, src); err != nil {
-			log.V("[TUN DNS] FakeIP: write response failed: %v", err)
+			log.Printf("[TUN DNS] FakeIP: write response failed: %v", err)
 		} else {
-			log.V("[TUN DNS] FakeIP: %s -> %s", domain, fakeIPv4)
+			log.Printf("[TUN DNS] FakeIP: %s -> %s", domain, fakeIPv4)
 		}
 	}
 }
