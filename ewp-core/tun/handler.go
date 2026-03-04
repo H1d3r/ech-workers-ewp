@@ -239,9 +239,12 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 			return
 		}
 
-		actualRemote := remoteAddr
+		// Use the FakeIP the app originally connected to (session.remoteAddr) as the
+		// response source. This ensures FakeIP transparency: the app sent to a fakeIP
+		// and expects responses from that same fakeIP, not the real remote IP.
+		actualRemote := session.remoteAddr
 		if !actualRemote.IsValid() {
-			actualRemote = session.remoteAddr
+			actualRemote = remoteAddr
 		}
 
 		// Inject reply into gVisor:
@@ -266,7 +269,7 @@ func (h *Handler) cleanupUDPSessions() {
 		case <-h.ctx.Done():
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-5 * time.Minute).UnixNano()
+			cutoff := time.Now().Add(-2 * time.Minute).UnixNano()
 			h.udpSessions.Range(func(key, value interface{}) bool {
 				session := value.(*udpSession)
 				if session.lastActive.Load() < cutoff {
