@@ -298,13 +298,18 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	udpWriter := &gvisorUDPWriter{stack: nil}
 	vm.tunHandler = tun.NewHandler(ctx, vm.transport, udpWriter)
 
-	// Wire tunnel DNS resolver (DoQ→DoH→DoT fallback through proxy tunnel)
+	// Initialize FakeIP pool for instant DNS responses
+	fakeIPPool := dns.NewFakeIPPool()
+	vm.tunHandler.SetFakeIPPool(fakeIPPool)
+	log.Printf("[VPNManager] FakeIP DNS enabled")
+
+	// Wire tunnel DNS resolver as fallback
 	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(vm.transport, dns.TunnelDNSConfig{})
 	if dnsErr != nil {
-		log.Printf("[VPNManager] Warning: tunnel DNS resolver init failed: %v", dnsErr)
+		log.Printf("[VPNManager] Warning: tunnel DNS resolver init failed: %v (FakeIP handles DNS)", dnsErr)
 	} else {
 		vm.tunHandler.SetDNSResolver(dnsResolver)
-		log.Printf("[VPNManager] Tunnel DNS resolver initialized")
+		log.Printf("[VPNManager] Tunnel DNS resolver ready as fallback")
 	}
 
 	// 6. 创建 TUN 设备 (Android FileDescriptor)

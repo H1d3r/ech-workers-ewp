@@ -2,6 +2,7 @@ package tun
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -33,9 +34,10 @@ type Handler struct {
 	transport   transport.Transport
 	ctx         context.Context
 	dnsResolver *dns.TunnelDNSResolver
+	fakeIPPool  *dns.FakeIPPool
 
 	udpWriter   UDPWriter
-	udpSessions sync.Map // map[string]*udpSession (key is localAddr string)
+	udpSessions sync.Map // map[netip.AddrPort]*udpSession
 }
 
 func NewHandler(ctx context.Context, trans transport.Transport, udpWriter UDPWriter) *Handler {
@@ -56,11 +58,27 @@ func (h *Handler) SetDNSResolver(resolver *dns.TunnelDNSResolver) {
 	h.dnsResolver = resolver
 }
 
+// SetFakeIPPool sets the FakeIP pool for instant DNS responses.
+func (h *Handler) SetFakeIPPool(pool *dns.FakeIPPool) {
+	h.fakeIPPool = pool
+}
+
 func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 	dstAddr := conn.LocalAddr().(*net.TCPAddr)
 	srcAddr := conn.RemoteAddr().(*net.TCPAddr)
 
-	target := dstAddr.String()
+	// If destination is a fake IP, reverse-lookup the domain for Connect
+	var target string
+	if h.fakeIPPool != nil {
+		dstIP, _ := netip.AddrFromSlice(dstAddr.IP)
+		if domain, ok := h.fakeIPPool.LookupByIP(dstIP); ok {
+			target = net.JoinHostPort(domain, fmt.Sprint(dstAddr.Port))
+			log.V("[TUN TCP] FakeIP reverse: %s -> %s", dstAddr, target)
+		}
+	}
+	if target == "" {
+		target = dstAddr.String()
+	}
 	log.V("[TUN TCP] New connection: %s -> %s", srcAddr, target)
 
 	tunnelConn, err := h.transport.Dial()
@@ -124,11 +142,29 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 }
 
 func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) {
-	// DNS interception: resolve port 53 queries locally
-	if dst.Port() == 53 && h.dnsResolver != nil {
-		log.V("[TUN DNS] Intercepted DNS query: %s -> %s", src, dst)
-		h.handleDNS(payload, src, dst)
-		return
+	// DNS interception: use FakeIP for instant response, or fall back to DoH resolver
+	if dst.Port() == 53 {
+		if h.fakeIPPool != nil {
+			h.handleDNSFakeIP(payload, src, dst)
+			return
+		}
+		if h.dnsResolver != nil {
+			log.V("[TUN DNS] Intercepted DNS query: %s -> %s", src, dst)
+			h.handleDNS(payload, src, dst)
+			return
+		}
+	}
+
+	// Reverse-lookup fake IP to domain for UDP endpoint
+	var endpoint transport.Endpoint
+	if h.fakeIPPool != nil {
+		if domain, ok := h.fakeIPPool.LookupByIP(dst.Addr()); ok {
+			endpoint = transport.Endpoint{Domain: domain, Port: dst.Port()}
+			log.V("[TUN UDP] FakeIP reverse: %s -> %s:%d", dst, domain, dst.Port())
+		}
+	}
+	if endpoint.Domain == "" && !endpoint.Addr.IsValid() {
+		endpoint = transport.Endpoint{Addr: dst}
 	}
 
 	// Get or Create UDP tunnel session for the source IP:Port (NAT binding)
@@ -163,7 +199,7 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 			// is completely arbitrary since UDP mapping sends the actual target
 			// inside every WebSocket/transport packet frame anyway.
 			// We just arbitrarily use the First Packet's target.
-			if err := tunnelConn.ConnectUDP(transport.Endpoint{Addr: dst}, nil); err != nil {
+			if err := tunnelConn.ConnectUDP(endpoint, nil); err != nil {
 				log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
 				tunnelConn.Close()
 				h.udpSessions.Delete(src)
@@ -179,7 +215,7 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 	session.lastActive.Store(time.Now().UnixNano())
 
 	// Forward UDP payload to the target via the proxy tunnel
-	if err := session.tunnelConn.WriteUDP(transport.Endpoint{Addr: dst}, payload); err != nil {
+	if err := session.tunnelConn.WriteUDP(endpoint, payload); err != nil {
 		log.V("[TUN UDP] Packet send failed: %v", err)
 	}
 }
@@ -281,4 +317,39 @@ func (h *Handler) handleDNS(query []byte, src netip.AddrPort, dst netip.AddrPort
 			}
 		}
 	}(query, src, dst)
+}
+
+// handleDNSFakeIP intercepts a DNS query and returns a fake IP instantly.
+// No tunnel connection is needed — pure memory operation, < 1ms response.
+func (h *Handler) handleDNSFakeIP(query []byte, src netip.AddrPort, dst netip.AddrPort) {
+	if len(query) < 12 {
+		return
+	}
+
+	// Extract the queried domain name
+	domain := dns.ParseDNSName(query)
+	if domain == "" {
+		log.V("[TUN DNS] FakeIP: unable to parse domain from query")
+		return
+	}
+
+	// Allocate fake IPs for this domain
+	fakeIPv4 := h.fakeIPPool.AllocateIPv4(domain)
+	fakeIPv6 := h.fakeIPPool.AllocateIPv6(domain)
+
+	// Build DNS response with the fake IP
+	response := dns.BuildDNSResponse(query, fakeIPv4, fakeIPv6)
+	if response == nil {
+		log.V("[TUN DNS] FakeIP: unsupported query for %s", domain)
+		return
+	}
+
+	// Write response back to TUN (src=DNS server, dst=querying app)
+	if h.udpWriter != nil && h.ctx.Err() == nil {
+		if err := h.udpWriter.WriteTo(response, dst, src); err != nil {
+			log.V("[TUN DNS] FakeIP: write response failed: %v", err)
+		} else {
+			log.V("[TUN DNS] FakeIP: %s -> %s", domain, fakeIPv4)
+		}
+	}
 }

@@ -65,14 +65,20 @@ func New(cfg *Config) (*TUN, error) {
 	udpWriter := &gvisorUDPWriter{stack: nil}
 	handler := NewHandler(ctx, cfg.Transport, udpWriter)
 
+	// Initialize FakeIP pool for instant DNS responses (< 1ms, no tunnel needed)
+	fakeIPPool := dns.NewFakeIPPool()
+	handler.SetFakeIPPool(fakeIPPool)
+	log.Printf("[TUN] FakeIP DNS enabled (IPv4: 198.18.0.0/15, IPv6: fc00::/112)")
+
+	// Keep DoH resolver as optional fallback (not used when FakeIP is active)
 	dnsResolver, dnsErr := dns.NewTunnelDNSResolver(cfg.Transport, dns.TunnelDNSConfig{
 		DoHServer: cfg.TunnelDoHServer,
 	})
 	if dnsErr != nil {
-		log.Printf("[TUN] Warning: tunnel DNS resolver init failed: %v (DNS will use generic UDP proxy)", dnsErr)
+		log.Printf("[TUN] Warning: tunnel DNS resolver init failed: %v (FakeIP will handle all DNS)", dnsErr)
 	} else {
 		handler.SetDNSResolver(dnsResolver)
-		log.Printf("[TUN] Tunnel DNS resolver initialized (DoH server: %s)", dnsResolver.DoHServer())
+		log.Printf("[TUN] Tunnel DNS resolver ready as fallback (DoH server: %s)", dnsResolver.DoHServer())
 	}
 
 	mtu := uint32(cfg.MTU)
