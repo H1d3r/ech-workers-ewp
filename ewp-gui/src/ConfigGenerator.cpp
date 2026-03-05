@@ -209,6 +209,7 @@ QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
     if (node.enablePQC) {
         tls["pqc"] = true;
     }
+    tls["use_mozilla_ca"] = node.useMozillaCA;
 
     return tls;
 }

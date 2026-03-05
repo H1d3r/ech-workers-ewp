@@ -35,6 +35,7 @@ func NewVPNConfig(serverAddr, token string) *VPNConfigBuilder {
 			EnableECH:   true,  // 默认启用 ECH
 			EnableFlow:  true,  // 默认启用 Vision 流控
 			EnablePQC:   false, // 默认不启用 PQC
+			EnableMozillaCA: true, // 默认启用内置 Mozilla CA
 			TunMTU:      1400,  // 默认 MTU
 		},
 	}
@@ -79,6 +80,12 @@ func (b *VPNConfigBuilder) SetEnableFlow(enable bool) *VPNConfigBuilder {
 // SetEnablePQC 设置是否启用后量子加密
 func (b *VPNConfigBuilder) SetEnablePQC(enable bool) *VPNConfigBuilder {
 	b.config.EnablePQC = enable
+	return b
+}
+
+// SetEnableMozillaCA 设置是否启用内置 Mozilla 根证书
+func (b *VPNConfigBuilder) SetEnableMozillaCA(enable bool) *VPNConfigBuilder {
+	b.config.EnableMozillaCA = enable
 	return b
 }
 
@@ -334,6 +341,7 @@ func StartVPNAdvanced(
 		EnableECH:   enableECH,
 		EnableFlow:  enableFlow,
 		EnablePQC:   enablePQC,
+		EnableMozillaCA: true, // 默认开启
 		TunMTU:      1400,
 	}
 	return StartVPN(tunFD, config)

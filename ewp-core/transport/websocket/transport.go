@@ -27,6 +27,7 @@ type Transport struct {
 	enableFlow bool
 	enablePQC  bool
 	useTrojan  bool
+	useMozillaCA bool
 	path       string
 	host       string
 	sni        string
@@ -36,10 +37,10 @@ type Transport struct {
 }
 
 func New(serverAddr, token string, useECH, enableFlow bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, token, "", useECH, enableFlow, false, false, path, echMgr)
+	return NewWithProtocol(serverAddr, token, "", useECH, false, enableFlow, false, false, path, echMgr)
 }
 
-func NewWithProtocol(serverAddr, token, password string, useECH, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
+func NewWithProtocol(serverAddr, token, password string, useECH, useMozillaCA, enableFlow, enablePQC, useTrojan bool, path string, echMgr *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -60,6 +61,7 @@ func NewWithProtocol(serverAddr, token, password string, useECH, enableFlow, ena
 		enableFlow: enableFlow,
 		enablePQC:  enablePQC,
 		useTrojan:  useTrojan,
+		useMozillaCA: useMozillaCA,
 		path:       path,
 		headers:    make(map[string]string),
 		echManager: echMgr,
@@ -135,10 +137,11 @@ func (t *Transport) dial() (transport.TunnelConn, error) {
 	log.V("[WebSocket] Connecting to: %s (SNI: %s)", connectAddr, serverName)
 
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName: serverName,
-		EnableECH:  t.useECH,
-		EnablePQC:  t.enablePQC,
-		ECHManager: t.echManager,
+		ServerName:   serverName,
+		UseMozillaCA: t.useMozillaCA,
+		EnableECH:    t.useECH,
+		EnablePQC:    t.enablePQC,
+		ECHManager:   t.echManager,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("TLS config: %w", err)

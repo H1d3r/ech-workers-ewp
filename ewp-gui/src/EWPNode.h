@@ -58,6 +58,7 @@ struct EWPNode {
 
     // EWP 高级配置
     bool enableFlow = true;
+    bool useMozillaCA = true;
 
     // 测试结果
     int latency = 0;  // ms, -1=失败, 0=未测试
@@ -88,6 +89,7 @@ struct EWPNode {
         obj["dnsServer"] = dnsServer;
         obj["enablePQC"] = enablePQC;
         obj["enableFlow"] = enableFlow;
+        obj["useMozillaCA"] = useMozillaCA;
         return obj;
     }
 
@@ -114,6 +116,7 @@ struct EWPNode {
         node.dnsServer = obj["dnsServer"].toString("dns.alidns.com/dns-query");
         node.enablePQC = obj["enablePQC"].toBool(false);
         node.enableFlow = obj["enableFlow"].toBool(true);
+        node.useMozillaCA = obj["useMozillaCA"].toBool(true);
 
         // 新版 JSON 键：server / host
         // 兼容旧版 nodes.json：旧版 serverIP=连接目标, serverAddress=Host

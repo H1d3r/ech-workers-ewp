@@ -144,6 +144,7 @@ type TLSConfig struct {
 	Enabled         bool       `json:"enabled"`
 	ServerName      string     `json:"server_name,omitempty"`
 	Insecure        bool       `json:"insecure,omitempty"`
+	UseMozillaCA    bool       `json:"use_mozilla_ca,omitempty"`
 	ALPN            []string   `json:"alpn,omitempty"`
 	ECH             *ECHConfig `json:"ech,omitempty"`
 	PQC             bool       `json:"pqc,omitempty"`

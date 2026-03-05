@@ -29,6 +29,7 @@ type Transport struct {
 	useECH      bool
 	enableFlow  bool
 	enablePQC   bool
+	useMozillaCA bool
 	useTrojan   bool
 	serviceName string
 	authority   string
@@ -52,11 +53,11 @@ type Transport struct {
 
 // New creates a new HTTP/3 transport
 func New(serverAddr, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
+	return NewWithProtocol(serverAddr, uuidStr, "", useECH, false, enableFlow, false, false, serviceName, echManager)
 }
 
 // NewWithProtocol creates a new HTTP/3 transport with full options
-func NewWithProtocol(serverAddr, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+func NewWithProtocol(serverAddr, uuidStr, password string, useECH, useMozillaCA, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -80,6 +81,7 @@ func NewWithProtocol(serverAddr, uuidStr, password string, useECH, enableFlow, e
 		enableFlow:  enableFlow,
 		enablePQC:   enablePQC,
 		useTrojan:   useTrojan,
+		useMozillaCA: useMozillaCA,
 		serviceName: serviceName,
 		authority:   "",
 		idleTimeout: 30 * time.Second,
@@ -111,10 +113,11 @@ func (t *Transport) initClient() error {
 	}
 
 	tlsCfg, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName: serverName,
-		EnableECH:  t.useECH,
-		EnablePQC:  t.enablePQC,
-		ECHManager: t.echManager,
+		ServerName:   serverName,
+		UseMozillaCA: t.useMozillaCA,
+		EnableECH:    t.useECH,
+		EnablePQC:    t.enablePQC,
+		ECHManager:   t.echManager,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create TLS config: %w", err)

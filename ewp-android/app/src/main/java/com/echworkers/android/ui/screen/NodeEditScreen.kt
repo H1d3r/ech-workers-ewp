@@ -56,6 +56,7 @@ fun NodeEditScreen(
 
     var enablePQC by remember { mutableStateOf(existingNode?.enablePQC ?: false) }
     var enableFlow by remember { mutableStateOf(existingNode?.enableFlow ?: true) }
+    var enableMozillaCA by remember { mutableStateOf(existingNode?.enableMozillaCA ?: true) }
 
     val isValid = name.isNotBlank() && serverAddress.isNotBlank() &&
             (appProtocol == EWPNode.AppProtocol.TROJAN && password.isNotBlank() ||
@@ -96,7 +97,8 @@ fun NodeEditScreen(
                                 echDomain = echDomain,
                                 dnsServer = dnsServer,
                                 enableFlow = enableFlow,
-                                enablePQC = enablePQC
+                                enablePQC = enablePQC,
+                                enableMozillaCA = enableMozillaCA
                             )
                             if (existingNode == null) viewModel.addNode(node)
                             else viewModel.updateNode(node)
@@ -357,6 +359,10 @@ fun NodeEditScreen(
                         },
                         enabled = !enableECH
                     )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    SwitchRow("内置 Mozilla 根证书", "强制使用内置 CA 列表提高安全性", enableMozillaCA) { enableMozillaCA = it }
 
                     Spacer(Modifier.height(8.dp))
 

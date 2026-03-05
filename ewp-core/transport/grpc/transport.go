@@ -51,15 +51,16 @@ type Transport struct {
 	permitWithoutStream bool
 	initialWindowSize   int32
 	userAgent           string
+	useMozillaCA        bool
 	echManager          *commontls.ECHManager
 	bypassCfg           *transport.BypassConfig
 }
 
 func New(serverAddr, uuidStr string, useECH, enableFlow bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
-	return NewWithProtocol(serverAddr, uuidStr, "", useECH, enableFlow, false, false, serviceName, echManager)
+	return NewWithProtocol(serverAddr, uuidStr, "", useECH, false, enableFlow, false, false, serviceName, echManager)
 }
 
-func NewWithProtocol(serverAddr, uuidStr, password string, useECH, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
+func NewWithProtocol(serverAddr, uuidStr, password string, useECH, useMozillaCA, enableFlow, enablePQC, useTrojan bool, serviceName string, echManager *commontls.ECHManager) (*Transport, error) {
 	var uuid [16]byte
 	if !useTrojan {
 		var err error
@@ -90,6 +91,7 @@ func NewWithProtocol(serverAddr, uuidStr, password string, useECH, enableFlow, e
 		permitWithoutStream: false,
 		initialWindowSize:   0,
 		userAgent:           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+		useMozillaCA:        useMozillaCA,
 		echManager:          echManager,
 	}, nil
 }
@@ -250,10 +252,11 @@ func (t *Transport) getOrCreateConn(host, sniOverride, addr string) (*grpc.Clien
 	}))
 
 	tlsConfig, err := commontls.NewClient(commontls.ClientOptions{
-		ServerName: host,
-		EnableECH:  t.useECH,
-		EnablePQC:  t.enablePQC,
-		ECHManager: t.echManager,
+		ServerName:   host,
+		UseMozillaCA: t.useMozillaCA,
+		EnableECH:    t.useECH,
+		EnablePQC:    t.enablePQC,
+		ECHManager:   t.echManager,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)

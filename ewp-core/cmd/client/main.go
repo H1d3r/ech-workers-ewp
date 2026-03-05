@@ -129,9 +129,10 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 	transportType := outbound.Transport.Type
 	enableFlow := outbound.Flow != nil && outbound.Flow.Enabled
 	enablePQC := outbound.TLS != nil && outbound.TLS.PQC
+	useMozillaCA := outbound.TLS != nil && outbound.TLS.UseMozillaCA
 
-	log.Info("Transport: type=%s, flow=%v, ECH=%v, PQC=%v",
-		transportType, enableFlow, useECH, enablePQC)
+	log.Info("Transport: type=%s, flow=%v, ECH=%v, PQC=%v, MozillaCA=%v",
+		transportType, enableFlow, useECH, enablePQC, useMozillaCA)
 
 	// Create transport based on type
 	var trans transport.Transport
@@ -145,7 +146,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		}
 		trans, err = websocket.NewWithProtocol(
 			serverAddr, uuid, password,
-			useECH, enableFlow, enablePQC, useTrojan,
+			useECH, useMozillaCA, enableFlow, enablePQC, useTrojan,
 			path, echMgr,
 		)
 		if err != nil {
@@ -159,7 +160,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		}
 		grpcTrans, err := grpc.NewWithProtocol(
 			serverAddr, uuid, password,
-			useECH, enableFlow, enablePQC, useTrojan,
+			useECH, useMozillaCA, enableFlow, enablePQC, useTrojan,
 			serviceName, echMgr,
 		)
 		if err != nil {
@@ -178,7 +179,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		}
 		h3Trans, err := h3grpc.NewWithProtocol(
 			serverAddr, uuid, password,
-			useECH, enableFlow, enablePQC, useTrojan,
+			useECH, useMozillaCA, enableFlow, enablePQC, useTrojan,
 			serviceName, echMgr,
 		)
 		if err != nil {
@@ -200,7 +201,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		}
 		trans, err = xhttp.NewWithProtocol(
 			serverAddr, uuid, password,
-			useECH, enableFlow, enablePQC, useTrojan,
+			useECH, useMozillaCA, enableFlow, enablePQC, useTrojan,
 			path, echMgr,
 		)
 		if err != nil {

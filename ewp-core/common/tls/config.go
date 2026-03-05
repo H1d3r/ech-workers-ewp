@@ -3,17 +3,44 @@ package tls
 import (
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 )
+
+//go:embed mozilla_cas.pem
+var mozillaCAPEM []byte
+
+var (
+	mozillaPool *x509.CertPool
+	mozillaOnce sync.Once
+)
+
+// GetMozillaCertPool returns a CertPool containing root CAs from Mozilla NSS.
+func GetMozillaCertPool() *x509.CertPool {
+	mozillaOnce.Do(func() {
+		mozillaPool = x509.NewCertPool()
+		if !mozillaPool.AppendCertsFromPEM(mozillaCAPEM) {
+			// This should never happen if the embedded file is valid PEM
+			panic("failed to parse embedded mozilla_cas.pem")
+		}
+	})
+	return mozillaPool
+}
 
 type STDConfig struct {
 	config *tls.Config
 }
 
-func NewSTDConfig(serverName string, enablePQC bool) *STDConfig {
-	roots, _ := x509.SystemCertPool()
+func NewSTDConfig(serverName string, useMozillaCA bool, enablePQC bool) *STDConfig {
+	var roots *x509.CertPool
+	if useMozillaCA {
+		roots = GetMozillaCertPool()
+	} else {
+		roots, _ = x509.SystemCertPool()
+	}
 
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS13,
@@ -71,8 +98,8 @@ type STDECHConfig struct {
 	*STDConfig
 }
 
-func NewSTDECHConfig(serverName string, echList []byte, enablePQC bool) *STDECHConfig {
-	cfg := NewSTDConfig(serverName, enablePQC)
+func NewSTDECHConfig(serverName string, useMozillaCA bool, echList []byte, enablePQC bool) *STDECHConfig {
+	cfg := NewSTDConfig(serverName, useMozillaCA, enablePQC)
 	cfg.config.EncryptedClientHelloConfigList = echList
 	cfg.config.EncryptedClientHelloRejectionVerify = func(cs tls.ConnectionState) error {
 		return errors.New("server rejected ECH")
@@ -97,8 +124,8 @@ func (c *STDECHConfig) Clone() Config {
 }
 
 // BuildWithECH is a convenience function for backward compatibility
-func BuildWithECH(serverName string, echList []byte, enablePQC bool) (*tls.Config, error) {
-	cfg := NewSTDECHConfig(serverName, echList, enablePQC)
+func BuildWithECH(serverName string, useMozillaCA bool, echList []byte, enablePQC bool) (*tls.Config, error) {
+	cfg := NewSTDECHConfig(serverName, useMozillaCA, echList, enablePQC)
 	return cfg.TLSConfig()
 }
 

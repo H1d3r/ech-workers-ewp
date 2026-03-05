@@ -97,6 +97,7 @@ type VPNConfig struct {
 	// TLS 配置
 	EnableTLS     bool   // 是否启用 TLS（移动端一般始终 true）
 	MinTLSVersion string // "1.2" 或 "1.3"
+	EnableMozillaCA bool // 是否使用内置 Mozilla Root CAs
 
 	// gRPC / H3gRPC 附加配置
 	UserAgent   string // 自定义 User-Agent
@@ -189,6 +190,7 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			config.Token,
 			config.Password,
 			config.EnableECH,
+			config.EnableMozillaCA,
 			config.EnableFlow,
 			config.EnablePQC,
 			useTrojan,
@@ -206,6 +208,7 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			config.Token,
 			config.Password,
 			config.EnableECH,
+			config.EnableMozillaCA,
 			config.EnableFlow,
 			config.EnablePQC,
 			useTrojan,
@@ -228,6 +231,7 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			config.Token,
 			config.Password,
 			config.EnableECH,
+			config.EnableMozillaCA,
 			config.EnableFlow,
 			config.EnablePQC,
 			useTrojan,
@@ -250,6 +254,7 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			config.Token,
 			config.Password,
 			config.EnableECH,
+			config.EnableMozillaCA,
 			config.EnableFlow,
 			config.EnablePQC,
 			useTrojan,

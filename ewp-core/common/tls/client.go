@@ -1,20 +1,21 @@
 package tls
 
 type ClientOptions struct {
-	ServerName string
-	EnableECH  bool
-	ECHList    []byte
-	EnablePQC  bool
-	ECHManager *ECHManager
+	ServerName   string
+	UseMozillaCA bool
+	EnableECH    bool
+	ECHList      []byte
+	EnablePQC    bool
+	ECHManager   *ECHManager
 }
 
 func NewClient(options ClientOptions) (Config, error) {
 	if !options.EnableECH {
-		return NewSTDConfig(options.ServerName, options.EnablePQC), nil
+		return NewSTDConfig(options.ServerName, options.UseMozillaCA, options.EnablePQC), nil
 	}
 
 	if len(options.ECHList) > 0 {
-		return NewSTDECHConfig(options.ServerName, options.ECHList, options.EnablePQC), nil
+		return NewSTDECHConfig(options.ServerName, options.UseMozillaCA, options.ECHList, options.EnablePQC), nil
 	}
 
 	if options.ECHManager != nil {
@@ -22,14 +23,14 @@ func NewClient(options ClientOptions) (Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		cfg := NewSTDECHConfig(options.ServerName, echList, options.EnablePQC)
+		cfg := NewSTDECHConfig(options.ServerName, options.UseMozillaCA, echList, options.EnablePQC)
 		return &ManagedECHConfig{
 			STDECHConfig: cfg,
 			manager:      options.ECHManager,
 		}, nil
 	}
 
-	return NewSTDConfig(options.ServerName, options.EnablePQC), nil
+	return NewSTDConfig(options.ServerName, options.UseMozillaCA, options.EnablePQC), nil
 }
 
 type ManagedECHConfig struct {
