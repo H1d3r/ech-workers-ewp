@@ -45,6 +45,7 @@ class EWPVpnService : VpnService(), SocketProtector {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var currentNode: EWPNode? = null
     private var proxyConfig: ProxyConfig = ProxyConfig()
+    @Volatile private var stopping = false
     
     override fun onCreate() {
         super.onCreate()
@@ -85,14 +86,17 @@ class EWPVpnService : VpnService(), SocketProtector {
                 }
             }
             ACTION_STOP -> {
-                stopVPN()
-                stopSelf()
+                scope.launch {
+                    doStop()
+                    stopSelf()
+                }
             }
         }
         return START_STICKY
     }
     
     private fun startVPN(node: EWPNode) {
+        stopping = false
         scope.launch {
             try {
                 Log.i(TAG, "Starting VPN: ${node.displayType()} - ${node.serverAddress}")
@@ -103,6 +107,13 @@ class EWPVpnService : VpnService(), SocketProtector {
                 if (tunFD < 0) {
                     broadcastError("Failed to establish VPN interface")
                     stopSelf()
+                    return@launch
+                }
+                
+                if (stopping) {
+                    vpnInterface?.close()
+                    vpnInterface = null
+                    broadcastState(VpnServiceState.DISCONNECTED)
                     return@launch
                 }
                 
@@ -119,6 +130,14 @@ class EWPVpnService : VpnService(), SocketProtector {
                 val config = buildVPNConfig(node)
                 
                 Ewpmobile.startVPN(tunFD.toLong(), config)
+                
+                if (stopping) {
+                    Ewpmobile.stopVPN()
+                    vpnInterface?.close()
+                    vpnInterface = null
+                    broadcastState(VpnServiceState.DISCONNECTED)
+                    return@launch
+                }
                 
                 currentNode = node
                 
@@ -284,26 +303,20 @@ class EWPVpnService : VpnService(), SocketProtector {
         }
     }
     
-    private fun stopVPN() {
-        scope.launch {
-            try {
-                Log.i(TAG, "Stopping VPN...")
-                
-                broadcastState(VpnServiceState.DISCONNECTING)
-                
-                Ewpmobile.stopVPN()
-                
-                vpnInterface?.close()
-                vpnInterface = null
-                currentNode = null
-                
-                Log.i(TAG, "VPN stopped successfully")
-                broadcastState(VpnServiceState.DISCONNECTED)
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to stop VPN", e)
-                broadcastError("断开失败: ${e.message}")
-            }
+    private suspend fun doStop() {
+        stopping = true
+        try {
+            Log.i(TAG, "Stopping VPN...")
+            broadcastState(VpnServiceState.DISCONNECTING)
+            Ewpmobile.stopVPN()
+            vpnInterface?.close()
+            vpnInterface = null
+            currentNode = null
+            Log.i(TAG, "VPN stopped successfully")
+            broadcastState(VpnServiceState.DISCONNECTED)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to stop VPN", e)
+            broadcastState(VpnServiceState.DISCONNECTED)
         }
     }
     
@@ -364,7 +377,11 @@ class EWPVpnService : VpnService(), SocketProtector {
     
     override fun onDestroy() {
         super.onDestroy()
-        stopVPN()
+        stopping = true
+        try { Ewpmobile.stopVPN() } catch (_: Exception) {}
+        try { vpnInterface?.close() } catch (_: Exception) {}
+        vpnInterface = null
+        broadcastState(VpnServiceState.DISCONNECTED)
         scope.cancel()
     }
 }
