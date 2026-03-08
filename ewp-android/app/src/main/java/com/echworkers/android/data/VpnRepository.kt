@@ -11,6 +11,7 @@ import com.echworkers.android.model.VpnState
 import com.echworkers.android.model.VpnStats
 import com.echworkers.android.service.*
 import ewpmobile.Ewpmobile
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,9 +22,12 @@ class VpnRepository(private val context: Context) {
     
     companion object {
         private const val TAG = "VpnRepository"
+        private const val TRANSITION_TIMEOUT_MS = 15_000L
     }
     
     private val json = Json { ignoreUnknownKeys = true }
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var timeoutJob: Job? = null
     
     private val _state = MutableStateFlow<VpnState>(VpnState.Disconnected)
     val state: StateFlow<VpnState> = _state.asStateFlow()
@@ -55,8 +59,20 @@ class VpnRepository(private val context: Context) {
         }
     }
     
+    private fun startTransitionTimeout() {
+        timeoutJob?.cancel()
+        timeoutJob = scope.launch {
+            delay(TRANSITION_TIMEOUT_MS)
+            if (_state.value is VpnState.Connecting || _state.value is VpnState.Disconnecting) {
+                Log.w(TAG, "State transition timeout, resetting to Disconnected")
+                _state.value = VpnState.Disconnected
+            }
+        }
+    }
+
     fun connect(node: EWPNode, proxyConfig: ProxyConfig) {
         _state.value = VpnState.Connecting
+        startTransitionTimeout()
         try {
             val intent = Intent(context, EWPVpnService::class.java).apply {
                 action = EWPVpnService.ACTION_START
@@ -74,6 +90,7 @@ class VpnRepository(private val context: Context) {
     
     fun disconnect() {
         _state.value = VpnState.Disconnecting
+        startTransitionTimeout()
         try {
             val intent = Intent(context, EWPVpnService::class.java).apply {
                 action = EWPVpnService.ACTION_STOP
@@ -91,13 +108,14 @@ class VpnRepository(private val context: Context) {
     }
     
     private fun handleStateChange(stateName: String) {
+        timeoutJob?.cancel()
         _state.value = when (VpnServiceState.valueOf(stateName)) {
             VpnServiceState.DISCONNECTED -> VpnState.Disconnected
             VpnServiceState.CONNECTING -> VpnState.Connecting
             VpnServiceState.CONNECTED -> VpnState.Connected(VpnStats())
             VpnServiceState.DISCONNECTING -> VpnState.Disconnecting
         }
-        Log.d(TAG, "State changed: $stateName")
+        Log.i(TAG, "State changed: $stateName -> ${_state.value::class.simpleName}")
     }
     
     private fun handleStats(statsJson: String) {
@@ -120,6 +138,8 @@ class VpnRepository(private val context: Context) {
     }
     
     fun unregister() {
+        timeoutJob?.cancel()
+        scope.cancel()
         try {
             context.unregisterReceiver(receiver)
         } catch (e: Exception) {

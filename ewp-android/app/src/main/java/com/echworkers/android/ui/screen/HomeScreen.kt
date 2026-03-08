@@ -195,7 +195,6 @@ private fun ConnectionCard(
                     }
                 }
                 
-                StatusIcon(vpnState)
             }
             
             if (vpnState is VpnState.Connected) {
@@ -218,11 +217,7 @@ private fun ConnectionCard(
                 Button(
                     onClick = if (vpnState.isActive()) onDisconnect else onConnect,
                     modifier = Modifier.weight(1f),
-                    enabled = when {
-                        vpnState.isActive() -> true
-                        vpnState is VpnState.Disconnecting -> false
-                        else -> selectedNode != null
-                    },
+                    enabled = selectedNode != null,
                     colors = if (vpnState.isActive()) {
                         ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.error
@@ -268,8 +263,19 @@ private fun StatusIcon(vpnState: VpnState) {
                 modifier = Modifier.size(48.dp)
             )
         }
-        VpnState.Connecting, VpnState.Disconnecting -> {
-            CircularProgressIndicator(
+        VpnState.Connecting -> {
+            Icon(
+                Icons.Default.Circle,
+                contentDescription = "连接中",
+                tint = WarningColor,
+                modifier = Modifier.size(48.dp)
+            )
+        }
+        VpnState.Disconnecting -> {
+            Icon(
+                Icons.Default.Circle,
+                contentDescription = "断开中",
+                tint = MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier.size(48.dp)
             )
         }
