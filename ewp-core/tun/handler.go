@@ -22,6 +22,11 @@ type udpSession struct {
 	tunnelConn transport.TunnelConn
 	remoteAddr netip.AddrPort // the remote server addr (responses appear to come FROM here)
 	lastActive atomic.Int64  // UnixNano; updated on every packet, read by cleanup goroutine
+
+	// seenPeers tracks real IPs of P2P peers seen during this session.
+	// Used to eagerly release their FakeIP slots when the session closes.
+	seenPeersMu sync.Mutex
+	seenPeers   map[netip.Addr]struct{}
 }
 
 // UDPWriter allows the handler to write responses back to the TUN virtual device
@@ -146,13 +151,16 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		return
 	}
 
-	// Reverse-lookup fake IP to domain for UDP endpoint
+	// Reverse-lookup fake IP to domain or peer IP for UDP endpoint
 	var endpoint transport.Endpoint
 	if h.fakeIPPool != nil {
 		unmapped := dst.Addr().Unmap()
 		if domain, ok := h.fakeIPPool.LookupByIP(unmapped); ok {
 			endpoint = transport.Endpoint{Domain: domain, Port: dst.Port()}
 			log.Printf("[TUN UDP] FakeIP reverse: %s -> %s:%d", dst, domain, dst.Port())
+		} else if realIP, ok := h.fakeIPPool.LookupPeerByFakeIP(unmapped); ok {
+			endpoint = transport.Endpoint{Addr: netip.AddrPortFrom(realIP, dst.Port())}
+			log.Printf("[TUN UDP] Peer FakeIP reverse: %s -> %s:%d", dst, realIP, dst.Port())
 		}
 	}
 	if endpoint.Domain == "" && !endpoint.Addr.IsValid() {
@@ -222,6 +230,18 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 		defer h.udpWriter.ReleaseConn(session.remoteAddr, tunClientSrc)
 	}
 
+	// Release all peer FakeIP slots allocated during this session.
+	if h.fakeIPPool != nil {
+		defer func() {
+			session.seenPeersMu.Lock()
+			peers := session.seenPeers
+			session.seenPeersMu.Unlock()
+			for realIP := range peers {
+				h.fakeIPPool.ReleasePeerFakeIP(realIP)
+			}
+		}()
+	}
+
 	stopPing := session.tunnelConn.StartPing(10 * time.Second)
 	defer close(stopPing)
 
@@ -239,11 +259,29 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 			return
 		}
 
-		// We must use the REAL remoteAddr returned by the server to preserve Full Cone NAT responses.
-		// ONLY if the app originally sent to a FakeIP (transparent proxy) do we mask it back to ensure transparency.
+		// Determine the src address to inject into gVisor.
+		//
+		// Three cases:
+		//  1. Server returned no address → fall back to original session dst (FakeIP).
+		//  2. Server returned a FakeIP (already mapped) → use as-is (shouldn't normally happen).
+		//  3. Server returned a real IP (STUN server reply or Full Cone NAT P2P peer) →
+		//     allocate a stable FakeIP for that real IP so the app sees a consistent,
+		//     routable source address. HandleUDP will reverse-map replies back to the real IP.
 		actualRemote := remoteAddr
-		if !actualRemote.IsValid() || (session.remoteAddr.IsValid() && h.fakeIPPool != nil && h.fakeIPPool.IsFakeIP(session.remoteAddr.Addr())) {
+		if !actualRemote.IsValid() {
 			actualRemote = session.remoteAddr
+		} else if h.fakeIPPool != nil && !h.fakeIPPool.IsFakeIP(actualRemote.Addr()) {
+			realIP := actualRemote.Addr().Unmap()
+			peerFakeIP := h.fakeIPPool.AllocatePeerFakeIP(realIP)
+			if peerFakeIP.IsValid() {
+				actualRemote = netip.AddrPortFrom(peerFakeIP, actualRemote.Port())
+				session.seenPeersMu.Lock()
+				if session.seenPeers == nil {
+					session.seenPeers = make(map[netip.Addr]struct{}, 4)
+				}
+				session.seenPeers[realIP] = struct{}{}
+				session.seenPeersMu.Unlock()
+			}
 		}
 
 		// Inject reply into gVisor:

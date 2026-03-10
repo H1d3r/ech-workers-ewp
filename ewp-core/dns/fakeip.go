@@ -27,11 +27,16 @@ type FakeIPPool struct {
 	ip6Size  uint16
 	ip6Start uint16
 
-	// Bidirectional mappings
+	// Bidirectional domain mappings
 	domainToIP4 map[string]netip.Addr // "google.com" → 198.18.0.1
 	domainToIP6 map[string]netip.Addr // "google.com" → fc00::1
 	ip4ToDomain map[netip.Addr]string // 198.18.0.1 → "google.com"
 	ip6ToDomain map[netip.Addr]string // fc00::1 → "google.com"
+
+	// Bidirectional peer IP mappings (Full Cone NAT: P2P peers with no DNS record)
+	// A real peer IP gets a stable FakeIP so the app can see and route back to it.
+	peerToFakeIP map[netip.Addr]netip.Addr // 1.2.3.4 → 198.18.x.x
+	fakeIPToPeer map[netip.Addr]netip.Addr // 198.18.x.x → 1.2.3.4
 }
 
 // NewFakeIPPool creates a new FakeIP pool.
@@ -51,6 +56,9 @@ func NewFakeIPPool() *FakeIPPool {
 		domainToIP6: make(map[string]netip.Addr, 4096),
 		ip4ToDomain: make(map[netip.Addr]string, 4096),
 		ip6ToDomain: make(map[netip.Addr]string, 4096),
+
+		peerToFakeIP: make(map[netip.Addr]netip.Addr, 256),
+		fakeIPToPeer: make(map[netip.Addr]netip.Addr, 256),
 	}
 }
 
@@ -92,15 +100,24 @@ func (p *FakeIPPool) AllocateIPv4(domain string) netip.Addr {
 	}
 
 	ip := p.nextIPv4()
-
-	// If this IP was previously allocated to another domain, evict it
-	if old, exists := p.ip4ToDomain[ip]; exists {
-		delete(p.domainToIP4, old)
-	}
+	p.evictIP4Locked(ip)
 
 	p.domainToIP4[domain] = ip
 	p.ip4ToDomain[ip] = domain
 	return ip
+}
+
+// evictIP4Locked removes any existing domain or peer mapping for the given FakeIP.
+// Must be called with mu held.
+func (p *FakeIPPool) evictIP4Locked(ip netip.Addr) {
+	if old, exists := p.ip4ToDomain[ip]; exists {
+		delete(p.domainToIP4, old)
+		delete(p.ip4ToDomain, ip)
+	}
+	if oldPeer, exists := p.fakeIPToPeer[ip]; exists {
+		delete(p.peerToFakeIP, oldPeer)
+		delete(p.fakeIPToPeer, ip)
+	}
 }
 
 // AllocateIPv6 returns a fake IPv6 for the given domain.
@@ -121,6 +138,48 @@ func (p *FakeIPPool) AllocateIPv6(domain string) netip.Addr {
 	p.domainToIP6[domain] = ip
 	p.ip6ToDomain[ip] = domain
 	return ip
+}
+
+// AllocatePeerFakeIP allocates (or returns existing) FakeIP for a real peer IP.
+// Used for Full Cone NAT: incoming UDP from P2P peers with no DNS record gets a
+// stable FakeIP so the application can see the peer's address and route replies.
+func (p *FakeIPPool) AllocatePeerFakeIP(realIP netip.Addr) netip.Addr {
+	realIP = realIP.Unmap()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if existing, ok := p.peerToFakeIP[realIP]; ok {
+		return existing
+	}
+
+	ip := p.nextIPv4()
+	p.evictIP4Locked(ip)
+
+	p.peerToFakeIP[realIP] = ip
+	p.fakeIPToPeer[ip] = realIP
+	return ip
+}
+
+// ReleasePeerFakeIP eagerly frees the FakeIP slot for a real peer IP.
+// Call this when a P2P session closes to reclaim the slot immediately
+// rather than waiting for the pool to wrap around.
+func (p *FakeIPPool) ReleasePeerFakeIP(realIP netip.Addr) {
+	realIP = realIP.Unmap()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if fakeIP, ok := p.peerToFakeIP[realIP]; ok {
+		delete(p.peerToFakeIP, realIP)
+		delete(p.fakeIPToPeer, fakeIP)
+	}
+}
+
+// LookupPeerByFakeIP returns the real peer IP for a peer-allocated FakeIP.
+// Returns (zero, false) if the FakeIP is not a peer mapping.
+func (p *FakeIPPool) LookupPeerByFakeIP(fakeIP netip.Addr) (netip.Addr, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	realIP, ok := p.fakeIPToPeer[fakeIP]
+	return realIP, ok
 }
 
 // nextIPv4 allocates the next IPv4 from the pool (caller must hold mu).
