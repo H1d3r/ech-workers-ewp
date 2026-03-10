@@ -274,6 +274,7 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 			realIP := actualRemote.Addr().Unmap()
 			peerFakeIP := h.fakeIPPool.AllocatePeerFakeIP(realIP)
 			if peerFakeIP.IsValid() {
+				log.Printf("[TUN UDP] Peer FakeIP alloc: %s -> %s (session: %s)", realIP, peerFakeIP, tunClientSrc)
 				actualRemote = netip.AddrPortFrom(peerFakeIP, actualRemote.Port())
 				session.seenPeersMu.Lock()
 				if session.seenPeers == nil {
