@@ -35,8 +35,11 @@ type FakeIPPool struct {
 
 	// Bidirectional peer IP mappings (Full Cone NAT: P2P peers with no DNS record)
 	// A real peer IP gets a stable FakeIP so the app can see and route back to it.
-	peerToFakeIP map[netip.Addr]netip.Addr // 1.2.3.4 → 198.18.x.x
-	fakeIPToPeer map[netip.Addr]netip.Addr // 198.18.x.x → 1.2.3.4
+	// Two pools: one for IPv4 clients (FakeIP in 198.18.x.x), one for IPv6 clients (FakeIP in fc00::x).
+	peerToFakeIP   map[netip.Addr]netip.Addr // realIP → IPv4 FakeIP (for IPv4 TUN clients)
+	fakeIPToPeer   map[netip.Addr]netip.Addr // IPv4 FakeIP → realIP
+	peerToFakeIPv6 map[netip.Addr]netip.Addr // realIP → IPv6 FakeIP (for IPv6 TUN clients)
+	fakeIPv6ToPeer map[netip.Addr]netip.Addr // IPv6 FakeIP → realIP
 }
 
 // NewFakeIPPool creates a new FakeIP pool.
@@ -57,8 +60,10 @@ func NewFakeIPPool() *FakeIPPool {
 		ip4ToDomain: make(map[netip.Addr]string, 4096),
 		ip6ToDomain: make(map[netip.Addr]string, 4096),
 
-		peerToFakeIP: make(map[netip.Addr]netip.Addr, 256),
-		fakeIPToPeer: make(map[netip.Addr]netip.Addr, 256),
+		peerToFakeIP:   make(map[netip.Addr]netip.Addr, 256),
+		fakeIPToPeer:   make(map[netip.Addr]netip.Addr, 256),
+		peerToFakeIPv6: make(map[netip.Addr]netip.Addr, 256),
+		fakeIPv6ToPeer: make(map[netip.Addr]netip.Addr, 256),
 	}
 }
 
@@ -107,7 +112,7 @@ func (p *FakeIPPool) AllocateIPv4(domain string) netip.Addr {
 	return ip
 }
 
-// evictIP4Locked removes any existing domain or peer mapping for the given FakeIP.
+// evictIP4Locked removes any existing domain or peer mapping for the given IPv4 FakeIP.
 // Must be called with mu held.
 func (p *FakeIPPool) evictIP4Locked(ip netip.Addr) {
 	if old, exists := p.ip4ToDomain[ip]; exists {
@@ -117,6 +122,19 @@ func (p *FakeIPPool) evictIP4Locked(ip netip.Addr) {
 	if oldPeer, exists := p.fakeIPToPeer[ip]; exists {
 		delete(p.peerToFakeIP, oldPeer)
 		delete(p.fakeIPToPeer, ip)
+	}
+}
+
+// evictIP6Locked removes any existing domain or peer mapping for the given IPv6 FakeIP.
+// Must be called with mu held.
+func (p *FakeIPPool) evictIP6Locked(ip netip.Addr) {
+	if old, exists := p.ip6ToDomain[ip]; exists {
+		delete(p.domainToIP6, old)
+		delete(p.ip6ToDomain, ip)
+	}
+	if oldPeer, exists := p.fakeIPv6ToPeer[ip]; exists {
+		delete(p.peerToFakeIPv6, oldPeer)
+		delete(p.fakeIPv6ToPeer, ip)
 	}
 }
 
@@ -130,10 +148,7 @@ func (p *FakeIPPool) AllocateIPv6(domain string) netip.Addr {
 	}
 
 	ip := p.nextIPv6()
-
-	if old, exists := p.ip6ToDomain[ip]; exists {
-		delete(p.domainToIP6, old)
-	}
+	p.evictIP6Locked(ip)
 
 	p.domainToIP6[domain] = ip
 	p.ip6ToDomain[ip] = domain
@@ -160,7 +175,26 @@ func (p *FakeIPPool) AllocatePeerFakeIP(realIP netip.Addr) netip.Addr {
 	return ip
 }
 
-// ReleasePeerFakeIP eagerly frees the FakeIP slot for a real peer IP.
+// AllocatePeerFakeIPv6 allocates (or returns existing) IPv6 FakeIP for a real peer IP.
+// Used when the TUN client is using IPv6 so the injected packet has matching address family.
+func (p *FakeIPPool) AllocatePeerFakeIPv6(realIP netip.Addr) netip.Addr {
+	realIP = realIP.Unmap()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if existing, ok := p.peerToFakeIPv6[realIP]; ok {
+		return existing
+	}
+
+	ip := p.nextIPv6()
+	p.evictIP6Locked(ip)
+
+	p.peerToFakeIPv6[realIP] = ip
+	p.fakeIPv6ToPeer[ip] = realIP
+	return ip
+}
+
+// ReleasePeerFakeIP eagerly frees the FakeIP slot for a real peer IP (both IPv4 and IPv6).
 // Call this when a P2P session closes to reclaim the slot immediately
 // rather than waiting for the pool to wrap around.
 func (p *FakeIPPool) ReleasePeerFakeIP(realIP netip.Addr) {
@@ -171,14 +205,21 @@ func (p *FakeIPPool) ReleasePeerFakeIP(realIP netip.Addr) {
 		delete(p.peerToFakeIP, realIP)
 		delete(p.fakeIPToPeer, fakeIP)
 	}
+	if fakeIP, ok := p.peerToFakeIPv6[realIP]; ok {
+		delete(p.peerToFakeIPv6, realIP)
+		delete(p.fakeIPv6ToPeer, fakeIP)
+	}
 }
 
-// LookupPeerByFakeIP returns the real peer IP for a peer-allocated FakeIP.
+// LookupPeerByFakeIP returns the real peer IP for a peer-allocated FakeIP (IPv4 or IPv6).
 // Returns (zero, false) if the FakeIP is not a peer mapping.
 func (p *FakeIPPool) LookupPeerByFakeIP(fakeIP netip.Addr) (netip.Addr, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	realIP, ok := p.fakeIPToPeer[fakeIP]
+	if realIP, ok := p.fakeIPToPeer[fakeIP]; ok {
+		return realIP, true
+	}
+	realIP, ok := p.fakeIPv6ToPeer[fakeIP]
 	return realIP, ok
 }
 

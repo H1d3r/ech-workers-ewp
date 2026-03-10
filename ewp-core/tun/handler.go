@@ -289,7 +289,15 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 				actualRemote = session.remoteAddr
 			} else {
 				// New source IP → Full Cone NAT P2P peer, allocate a fresh FakeIP.
-				peerFakeIP := h.fakeIPPool.AllocatePeerFakeIP(realIP)
+				// The FakeIP address family MUST match tunClientSrc so gVisor dialUDP
+				// does not mix IPv4 src with IPv6 dst (or vice-versa) → panic.
+				var peerFakeIP netip.Addr
+				clientAddr := tunClientSrc.Addr().Unmap()
+				if clientAddr.Is4() {
+					peerFakeIP = h.fakeIPPool.AllocatePeerFakeIP(realIP)
+				} else {
+					peerFakeIP = h.fakeIPPool.AllocatePeerFakeIPv6(realIP)
+				}
 				if peerFakeIP.IsValid() {
 					log.Printf("[TUN UDP] Peer FakeIP alloc: %s -> %s (session: %s)", realIP, peerFakeIP, tunClientSrc)
 					actualRemote = netip.AddrPortFrom(peerFakeIP, actualRemote.Port())
