@@ -16,6 +16,7 @@ import (
 	"ewp-core/transport/grpc"
 	"ewp-core/transport/h3grpc"
 	"ewp-core/transport/websocket"
+	"ewp-core/transport/webtransport"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
 	"ewp-core/tun/util"
@@ -208,6 +209,21 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			return nil, err
 		}
 
+	case "webtransport":
+		path := outbound.Transport.Path
+		if path == "" {
+			path = "/wt"
+		}
+		wtTrans, wtErr := webtransport.New(
+			serverAddr, uuid,
+			useECH, useMozillaCA, enablePQC,
+			path, echMgr,
+		)
+		if wtErr != nil {
+			return nil, wtErr
+		}
+		trans = wtTrans
+
 	default:
 		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
 	}
@@ -243,6 +259,8 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		case *h3grpc.Transport:
 			t.SetSNI(effectiveSNI)
 		case *xhttp.Transport:
+			t.SetSNI(effectiveSNI)
+		case *webtransport.Transport:
 			t.SetSNI(effectiveSNI)
 		}
 	}

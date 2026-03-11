@@ -148,23 +148,30 @@ QJsonObject ConfigGenerator::generateTransport(const EWPNode &node)
                 transport["content_type"] = node.contentType;
             }
             
-            QJsonObject grpcWeb;
-            grpcWeb["mode"] = "binary";
-            grpcWeb["max_message_size"] = 4194304;
-            grpcWeb["compression"] = "none";
-            transport["grpc_web"] = grpcWeb;
-            
-            transport["concurrency"] = 4;
-            
-            QJsonObject quic;
-            quic["initial_stream_window_size"] = 6291456;
-            quic["max_stream_window_size"] = 16777216;
-            quic["initial_connection_window_size"] = 15728640;
-            quic["max_connection_window_size"] = 25165824;
-            quic["max_idle_timeout"] = "30s";
-            quic["keep_alive_period"] = "10s";
-            quic["disable_path_mtu_discovery"] = false;
-            transport["quic"] = quic;
+            {
+                QJsonObject grpcWeb;
+                grpcWeb["mode"] = "binary";
+                grpcWeb["max_message_size"] = 4194304;
+                grpcWeb["compression"] = "none";
+                transport["grpc_web"] = grpcWeb;
+
+                transport["concurrency"] = 4;
+
+                QJsonObject quic;
+                quic["initial_stream_window_size"] = 6291456;
+                quic["max_stream_window_size"] = 16777216;
+                quic["initial_connection_window_size"] = 15728640;
+                quic["max_connection_window_size"] = 25165824;
+                quic["max_idle_timeout"] = "30s";
+                quic["keep_alive_period"] = "10s";
+                quic["disable_path_mtu_discovery"] = false;
+                transport["quic"] = quic;
+            }
+            break;
+
+        case EWPNode::WEBTRANSPORT:
+            transport["type"] = "webtransport";
+            transport["path"] = node.wtPath.isEmpty() ? "/wt" : node.wtPath;
             break;
     }
     
@@ -188,7 +195,7 @@ QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
     }
 
     QJsonArray alpn;
-    if (node.transportMode == EWPNode::H3GRPC) {
+    if (node.transportMode == EWPNode::H3GRPC || node.transportMode == EWPNode::WEBTRANSPORT) {
         alpn.append("h3");
     } else if (node.transportMode == EWPNode::GRPC) {
         alpn.append("h2");

@@ -44,7 +44,7 @@ func EstablishTunnel(ctx context.Context, handshakeData []byte, opts TunnelOptio
 		if result.IsTrojan {
 			HandleTrojanUDPConnection(rw, rw)
 		} else {
-			HandleUDPConnection(rw, rw)
+			HandleUDPConnection(rw, rw, result.Target)
 		}
 
 		log.Info("[Tunnel] UDP closed: %s -> %s", opts.ClientIP, result.Target)

@@ -21,6 +21,7 @@ data class EWPNode(
     val xhttpMode: String = "auto",
     val userAgent: String = "",
     val contentType: String = "",
+    val wtPath: String = "/wt",
     
     val host: String = "",
     val sni: String = "",
@@ -45,7 +46,7 @@ data class EWPNode(
     
     @Serializable
     enum class TransportMode {
-        WS, GRPC, XHTTP, H3GRPC
+        WS, GRPC, XHTTP, H3GRPC, WEBTRANSPORT
     }
     
     fun isValid(): Boolean {
@@ -62,6 +63,7 @@ data class EWPNode(
             TransportMode.GRPC -> "gRPC"
             TransportMode.XHTTP -> "XHTTP"
             TransportMode.H3GRPC -> "H3"
+            TransportMode.WEBTRANSPORT -> "WT"
         }
         return "$prefix-$transport"
     }

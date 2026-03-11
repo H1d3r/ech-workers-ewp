@@ -421,7 +421,7 @@ func (o *OutboundConfig) Validate() error {
 
 // Validate validates transport configuration
 func (t *TransportConfig) Validate() error {
-	validTypes := map[string]bool{"ws": true, "grpc": true, "h3grpc": true, "xhttp": true}
+	validTypes := map[string]bool{"ws": true, "grpc": true, "h3grpc": true, "xhttp": true, "webtransport": true}
 	if !validTypes[t.Type] {
 		return fmt.Errorf("invalid type: %s", t.Type)
 	}
@@ -454,6 +454,11 @@ func (t *TransportConfig) Validate() error {
 		validModes := map[string]bool{"auto": true, "stream-one": true, "stream-down": true}
 		if !validModes[t.Mode] {
 			return fmt.Errorf("invalid xhttp mode: %s", t.Mode)
+		}
+
+	case "webtransport":
+		if t.Path == "" {
+			t.Path = "/wt"
 		}
 	}
 

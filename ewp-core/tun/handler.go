@@ -101,7 +101,9 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 	defer conn.Close()
 
 	stopPing := tunnelConn.StartPing(10 * time.Second)
-	defer close(stopPing)
+	if stopPing != nil {
+		defer close(stopPing)
+	}
 
 	if err := tunnelConn.Connect(target, nil); err != nil {
 		log.Printf("[TUN TCP] CONNECT failed: %v", err)
@@ -250,7 +252,9 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 	}
 
 	stopPing := session.tunnelConn.StartPing(10 * time.Second)
-	defer close(stopPing)
+	if stopPing != nil {
+		defer close(stopPing)
+	}
 
 	buf := commpool.GetLarge()
 	defer commpool.PutLarge(buf)

@@ -27,8 +27,8 @@ struct EWPNode {
     // Trojan 认证
     QString trojanPassword;
 
-    // 传输协议: 0=WebSocket, 1=gRPC, 2=XHTTP, 3=H3gRPC
-    enum TransportMode { WS = 0, GRPC = 1, XHTTP = 2, H3GRPC = 3 };
+    // 传输协议: 0=WebSocket, 1=gRPC, 2=XHTTP, 3=H3gRPC, 4=WebTransport
+    enum TransportMode { WS = 0, GRPC = 1, XHTTP = 2, H3GRPC = 3, WEBTRANSPORT = 4 };
     TransportMode transportMode = WS;
 
     // WebSocket 配置
@@ -42,6 +42,9 @@ struct EWPNode {
     // XHTTP 配置
     QString xhttpMode = "auto";
     QString xhttpPath = "/xhttp";
+
+    // WebTransport 配置
+    QString wtPath = "/wt";
 
     // TLS 配置
     bool enableTLS = true;
@@ -81,6 +84,7 @@ struct EWPNode {
         obj["contentType"] = contentType;
         obj["xhttpMode"] = xhttpMode;
         obj["xhttpPath"] = xhttpPath;
+        obj["wtPath"] = wtPath;
         obj["enableTLS"] = enableTLS;
         obj["sni"] = sni;
         obj["minTLSVersion"] = minTLSVersion;
@@ -108,6 +112,7 @@ struct EWPNode {
         node.contentType = obj["contentType"].toString();
         node.xhttpMode = obj["xhttpMode"].toString("auto");
         node.xhttpPath = obj["xhttpPath"].toString("/xhttp");
+        node.wtPath = obj["wtPath"].toString("/wt");
         node.enableTLS = obj["enableTLS"].toBool(true);
         node.sni = obj["sni"].toString();
         node.minTLSVersion = obj["minTLSVersion"].toString("1.2");
@@ -142,11 +147,12 @@ struct EWPNode {
     QString displayType() const {
         QString prefix = (appProtocol == TROJAN) ? "Trojan" : "EWP";
         switch (transportMode) {
-            case WS:     return prefix + "-WS";
-            case GRPC:   return prefix + "-gRPC";
-            case XHTTP:  return prefix + "-XHTTP";
-            case H3GRPC: return prefix + "-H3";
-            default:     return prefix;
+            case WS:           return prefix + "-WS";
+            case GRPC:         return prefix + "-gRPC";
+            case XHTTP:        return prefix + "-XHTTP";
+            case H3GRPC:       return prefix + "-H3";
+            case WEBTRANSPORT: return prefix + "-WT";
+            default:           return prefix;
         }
     }
 

@@ -1,0 +1,35 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1:30000",
+      "udp": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "ewp",
+      "tag": "proxy-out",
+      "server": "your.domain.com",
+      "server_port": 443,
+      "uuid": "d342d11e-d424-4583-b36e-524ab1f0afa4",
+      "transport": {
+        "type": "webtransport",
+        "path": "/wt"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "your.domain.com"
+      }
+    }
+  ],
+  "route": {
+    "final": "proxy-out",
+    "auto_detect_interface": true
+  }
+}

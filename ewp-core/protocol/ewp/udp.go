@@ -61,6 +61,15 @@ var udpFramePool = sync.Pool{
 	},
 }
 
+// UDPWriteBufPool 复用写入缓冲区，减少 WriteUDP 高频调用路径的堆分配。
+// 典型 UDP 包 ≤ 1500 bytes (MTU)，预分配 FrameLen(2)+GlobalID(8)+Status(1)+AddrLen(1)+IPv6(19)+PayloadLen(2)+MTU(1500)。
+var UDPWriteBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 2+8+1+1+19+2+1500)
+		return &b
+	},
+}
+
 // EncodeUDPPacket 编码 UDP 包为字节流。
 // 优化：直接将 IP 写入输出 buf，消除 addrBytes 中间分配。
 func EncodeUDPPacket(pkt *UDPPacket) ([]byte, error) {

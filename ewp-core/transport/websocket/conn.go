@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"net"
 	"net/netip"
 	"sync"
 	"time"
@@ -296,30 +295,19 @@ func (c *Conn) connectEWPUDP(target transport.Endpoint, initialData []byte) erro
 
 	c.udpGlobalID = ewp.NewGlobalID()
 
+	// Use target.Addr directly; when only a domain is available (TUN+FakeIP mode),
+	// target.Addr is zero and the server falls back to the handshake target.
 	targetAddr := target.Addr
-	if target.Domain != "" && !targetAddr.IsValid() {
-		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
-			if ip4 := ips[0].To4(); ip4 != nil {
-				ip, _ := netip.AddrFromSlice(ip4)
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			} else {
-				ip, _ := netip.AddrFromSlice(ips[0].To16())
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			}
-		}
-	}
 
-	pkt := &ewp.UDPPacketAddr{
-		GlobalID: c.udpGlobalID,
-		Status:   ewp.UDPStatusNew,
-		Target:   targetAddr,
-		Payload:  initialData,
-	}
-	encoded, err := ewp.EncodeUDPAddrPacket(pkt)
+	// Use zero-alloc AppendUDPAddrFrame instead of EncodeUDPAddrPacket.
+	bufp := ewp.UDPWriteBufPool.Get().(*[]byte)
+	buf := (*bufp)[:0]
+	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusNew, targetAddr, initialData)
+
+	err = c.Write(buf)
+	*bufp = buf
+	ewp.UDPWriteBufPool.Put(bufp)
 	if err != nil {
-		return fmt.Errorf("encode UDP new packet: %w", err)
-	}
-	if err := c.Write(encoded); err != nil {
 		return fmt.Errorf("send UDP new packet: %w", err)
 	}
 	log.V("[EWP] WS UDP handshake ok: %v", target)
@@ -359,27 +347,17 @@ func (c *Conn) WriteUDP(target transport.Endpoint, data []byte) error {
 		return c.writeTrojanUDP(target, data)
 	}
 
+	// Use target.Addr directly; zero value means the server uses initTarget.
 	targetAddr := target.Addr
-	if target.Domain != "" && !targetAddr.IsValid() {
-		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
-			if ip4 := ips[0].To4(); ip4 != nil {
-				ip, _ := netip.AddrFromSlice(ip4)
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			} else {
-				ip, _ := netip.AddrFromSlice(ips[0].To16())
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			}
-		}
-	}
 
-	addrLen := 7
-	if targetAddr.IsValid() && targetAddr.Addr().Is6() {
-		addrLen = 19
-	}
-	totalCap := 2 + 8 + 1 + 1 + addrLen + 2 + len(data)
-	buf := make([]byte, 0, totalCap)
+	bufp := ewp.UDPWriteBufPool.Get().(*[]byte)
+	buf := (*bufp)[:0]
 	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, targetAddr, data)
-	return c.Write(buf)
+
+	err := c.Write(buf)
+	*bufp = buf
+	ewp.UDPWriteBufPool.Put(bufp)
+	return err
 }
 
 func (c *Conn) writeTrojanUDP(target transport.Endpoint, data []byte) error {

@@ -45,7 +45,9 @@ func (h *TunnelHandler) HandleTunnel(conn net.Conn, target string, clientAddr st
 	defer tunnelConn.Close()
 
 	stopPing := tunnelConn.StartPing(30 * time.Second)
-	defer close(stopPing)
+	if stopPing != nil {
+		defer close(stopPing)
+	}
 
 	conn.SetDeadline(time.Time{})
 

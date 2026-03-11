@@ -71,16 +71,24 @@ func (s *udpSession) close() {
 
 // udpHandler 管理单个客户端连接的全部 UDP 会话。
 type udpHandler struct {
-	mu       sync.Mutex
-	sessions map[[8]byte]*udpSession
-	writer   *chanWriter
+	mu            sync.Mutex
+	sessions      map[[8]byte]*udpSession
+	writer        *chanWriter
+	defaultTarget *net.UDPAddr // resolved from EWP handshake; fallback when frame has no target
 }
 
-func newUDPHandler(w io.Writer) *udpHandler {
-	return &udpHandler{
+func newUDPHandler(w io.Writer, defaultTarget string) *udpHandler {
+	h := &udpHandler{
 		sessions: make(map[[8]byte]*udpSession),
 		writer:   newChanWriter(w),
 	}
+	if defaultTarget != "" {
+		if addr, err := net.ResolveUDPAddr("udp", defaultTarget); err == nil {
+			h.defaultTarget = addr
+			log.Debug("UDP default target from handshake: %s", addr)
+		}
+	}
+	return h
 }
 
 func (h *udpHandler) getOrCreate(globalID [8]byte) (*udpSession, bool) {
@@ -164,10 +172,20 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 	s, created := h.getOrCreate(pkt.GlobalID)
 
 	if created {
-		// 新 session：必须是 New 状态且带目标地址
-		if pkt.Status != ewp.UDPStatusNew || pkt.Target == nil {
+		// 新 session：必须是 New 状态
+		if pkt.Status != ewp.UDPStatusNew {
 			h.remove(pkt.GlobalID)
 			return
+		}
+		// 当客户端未携带目标地址时（TUN+FakeIP 模式），使用握手阶段的默认目标
+		if pkt.Target == nil {
+			if h.defaultTarget != nil {
+				pkt.Target = h.defaultTarget
+			} else {
+				log.Warn("UDP New packet has no target and no default target available")
+				h.remove(pkt.GlobalID)
+				return
+			}
 		}
 		// ListenUDP（非连接 socket）：服务器绑定随机本地端口。
 		// 任意远端均可向该端口发包 → 真正的 Full-Cone NAT。
@@ -283,8 +301,12 @@ func (h *udpHandler) receiveResponses(s *udpSession) {
 }
 
 // HandleUDPConnection 处理 UDP 模式连接，每次调用独立隔离所有状态。
-func HandleUDPConnection(reader io.Reader, writer io.Writer) {
-	h := newUDPHandler(writer)
+func HandleUDPConnection(reader io.Reader, writer io.Writer, defaultTarget ...string) {
+	var target string
+	if len(defaultTarget) > 0 {
+		target = defaultTarget[0]
+	}
+	h := newUDPHandler(writer, target)
 	done := make(chan struct{})
 
 	go h.handleStream(reader, done)

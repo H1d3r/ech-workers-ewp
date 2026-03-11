@@ -58,6 +58,8 @@ void EditNodeDialog::setNode(const EWPNode &node)
     ui->comboXHTTPMode->setCurrentIndex(xhttpModeIndex);
     ui->editXHTTPPath->setText(node.xhttpPath);
 
+    ui->editWtPath->setText(node.wtPath);
+
     ui->checkEnableTLS->setChecked(node.enableTLS);
     ui->editSNI->setText(node.sni);
     ui->comboMinTLSVersion->setCurrentIndex(node.minTLSVersion == "1.3" ? 1 : 0);
@@ -104,6 +106,9 @@ EWPNode EditNodeDialog::getNode() const
     }
     node.xhttpPath = ui->editXHTTPPath->text().trimmed();
     if (node.xhttpPath.isEmpty()) node.xhttpPath = "/xhttp";
+
+    node.wtPath = ui->editWtPath->text().trimmed();
+    if (node.wtPath.isEmpty()) node.wtPath = "/wt";
 
     node.enableTLS = ui->checkEnableTLS->isChecked();
     node.sni = ui->editSNI->text().trimmed();
@@ -181,6 +186,7 @@ void EditNodeDialog::updateVisibility()
     ui->labelContentType->setVisible(mode == EWPNode::H3GRPC);
     ui->editContentType->setVisible(mode == EWPNode::H3GRPC);
     ui->xhttpGroup->setVisible(mode == EWPNode::XHTTP);
+    ui->wtGroup->setVisible(mode == EWPNode::WEBTRANSPORT);
 
     ui->editSNI->setEnabled(tlsEnabled);
     ui->checkEnablePQC->setEnabled(tlsEnabled);

@@ -160,6 +160,7 @@ class EWPVpnService : VpnService(), SocketProtector {
             EWPNode.TransportMode.GRPC -> "grpc"
             EWPNode.TransportMode.XHTTP -> "xhttp"
             EWPNode.TransportMode.H3GRPC -> "h3grpc"
+            EWPNode.TransportMode.WEBTRANSPORT -> "webtransport"
         }
         
         val path = when (node.transportMode) {
@@ -167,6 +168,7 @@ class EWPVpnService : VpnService(), SocketProtector {
             EWPNode.TransportMode.GRPC -> node.grpcServiceName
             EWPNode.TransportMode.XHTTP -> node.xhttpPath
             EWPNode.TransportMode.H3GRPC -> node.grpcServiceName
+            EWPNode.TransportMode.WEBTRANSPORT -> node.wtPath
         }
         
         val serverAddr = "${node.serverAddress}:${node.serverPort}"

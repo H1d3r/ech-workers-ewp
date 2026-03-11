@@ -14,9 +14,11 @@ import (
 	log "ewp-core/log"
 	"ewp-core/option"
 	pb "ewp-core/proto"
+	ewpwt "ewp-core/transport/webtransport"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	wtransport "github.com/quic-go/webtransport-go"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
@@ -73,16 +75,21 @@ func startFromConfig(configPath string) {
 		log.Info("TLS enabled (ALPN: %v)", cfg.TLS.ALPN)
 	}
 
-	hasH3 := false
+	hasH3, hasWT := false, false
 	for _, mode := range cfg.Listener.Modes {
-		if mode == "h3" {
+		switch mode {
+		case "h3":
 			hasH3 = true
-			break
+		case "webtransport":
+			hasWT = true
 		}
 	}
 
 	if hasH3 {
 		go startH3Listener(cfg, tlsConfig)
+	}
+	if hasWT {
+		go startWebTransportListener(cfg, tlsConfig)
 	}
 
 	mux := createUnifiedHandler(cfg)
@@ -158,7 +165,7 @@ func createUnifiedHandler(cfg *option.ServerConfig) http.Handler {
 			mux.HandleFunc(xhttpPath, xhttpHandler)
 			log.Info("XHTTP handler registered (path: %s)", xhttpPath)
 
-		case "h3":
+		case "h3", "webtransport":
 			continue
 
 		default:
@@ -226,6 +233,50 @@ func loadTLSConfig(cfg *option.ServerTLSConfig) (*tls.Config, error) {
 	}
 
 	return tlsConfig, nil
+}
+
+func startWebTransportListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
+	if tlsConfig == nil {
+		log.Fatalf("WebTransport requires TLS to be enabled")
+	}
+
+	wtPath := cfg.Listener.WTPath
+	if wtPath == "" {
+		wtPath = "/wt"
+	}
+
+	quicConfig := &quic.Config{
+		MaxIdleTimeout:                 60 * time.Second,
+		KeepAlivePeriod:                20 * time.Second,
+		InitialStreamReceiveWindow:     6 * 1024 * 1024,
+		MaxStreamReceiveWindow:         16 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 15 * 1024 * 1024,
+		MaxConnectionReceiveWindow:     25 * 1024 * 1024,
+		EnableDatagrams:                true,
+	}
+
+	addr := fmt.Sprintf("%s:%d", cfg.Listener.Address, cfg.Listener.Port)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", disguiseHandler)
+
+	wtServer := &wtransport.Server{
+		H3: &http3.Server{
+			Addr:       addr,
+			Handler:    mux,
+			TLSConfig:  tlsConfig,
+			QUICConfig: quicConfig,
+		},
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	mux.Handle(wtPath, ewpwt.NewHandler(wtServer, enableFlow))
+	log.Info("WebTransport handler registered (path: %s)", wtPath)
+	log.Info("WebTransport listening on %s (UDP/QUIC)", addr)
+
+	if err := wtServer.ListenAndServe(); err != nil {
+		log.Fatalf("WebTransport server failed: %v", err)
+	}
 }
 
 func startH3Listener(cfg *option.ServerConfig, tlsConfig *tls.Config) {

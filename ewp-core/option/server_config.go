@@ -19,12 +19,13 @@ type ServerConfig struct {
 type ListenerConfig struct {
 	Port    int      `json:"port"`              // Listen port
 	Address string   `json:"address,omitempty"` // Listen address (default: 0.0.0.0)
-	Modes   []string `json:"modes"`             // ws, grpc, xhttp, h3 (can enable multiple)
+	Modes   []string `json:"modes"`             // ws, grpc, xhttp, h3, webtransport (can enable multiple)
 
 	// Mode-specific paths
 	WSPath      string `json:"ws_path,omitempty"`      // WebSocket path
 	XHTTPPath   string `json:"xhttp_path,omitempty"`   // XHTTP path
 	GRPCService string `json:"grpc_service,omitempty"` // gRPC service name
+	WTPath      string `json:"wt_path,omitempty"`      // WebTransport endpoint path
 }
 
 // ProtocolConfig defines protocol settings
@@ -133,7 +134,7 @@ func (c *ServerConfig) Validate() error {
 		return fmt.Errorf("at least one mode must be enabled")
 	}
 
-	validModes := map[string]bool{"ws": true, "grpc": true, "xhttp": true, "h3": true}
+	validModes := map[string]bool{"ws": true, "grpc": true, "xhttp": true, "h3": true, "webtransport": true}
 	for _, mode := range c.Listener.Modes {
 		if !validModes[mode] {
 			return fmt.Errorf("invalid mode: %s", mode)
@@ -168,14 +169,13 @@ func (c *ServerConfig) Validate() error {
 		}
 	}
 
-	// Validate HTTP/3 requirements
+	// Validate HTTP/3 and WebTransport requirements
 	for _, mode := range c.Listener.Modes {
-		if mode == "h3" {
+		if mode == "h3" || mode == "webtransport" {
 			if c.TLS == nil || !c.TLS.Enabled {
-				return fmt.Errorf("HTTP/3 requires TLS to be enabled")
+				return fmt.Errorf("%s mode requires TLS to be enabled", mode)
 			}
 
-			// Ensure h3 is in ALPN
 			hasH3 := false
 			for _, alpn := range c.TLS.ALPN {
 				if alpn == "h3" {
@@ -184,7 +184,7 @@ func (c *ServerConfig) Validate() error {
 				}
 			}
 			if !hasH3 {
-				return fmt.Errorf("HTTP/3 mode requires 'h3' in TLS ALPN")
+				return fmt.Errorf("%s mode requires 'h3' in TLS ALPN", mode)
 			}
 		}
 	}

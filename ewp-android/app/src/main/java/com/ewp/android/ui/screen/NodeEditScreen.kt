@@ -45,6 +45,7 @@ fun NodeEditScreen(
     var xhttpMode by remember { mutableStateOf(existingNode?.xhttpMode ?: "auto") }
     var userAgent by remember { mutableStateOf(existingNode?.userAgent ?: "") }
     var contentType by remember { mutableStateOf(existingNode?.contentType ?: "") }
+    var wtPath by remember { mutableStateOf(existingNode?.wtPath ?: "/wt") }
 
     var enableTLS by remember { mutableStateOf(existingNode?.enableTLS ?: true) }
     var sni by remember { mutableStateOf(existingNode?.sni ?: "") }
@@ -90,6 +91,7 @@ fun NodeEditScreen(
                                 xhttpMode = xhttpMode,
                                 userAgent = userAgent,
                                 contentType = contentType,
+                                wtPath = wtPath,
                                 sni = sni,
                                 enableTLS = enableTLS,
                                 minTLSVersion = minTLSVersion,
@@ -214,19 +216,21 @@ fun NodeEditScreen(
             ConfigCard(title = "传输配置") {
                 DropdownRow(
                     label = "传输协议",
-                    options = listOf("WebSocket", "gRPC (HTTP/2)", "XHTTP", "H3gRPC (HTTP/3)"),
+                    options = listOf("WebSocket", "gRPC (HTTP/2)", "XHTTP", "H3gRPC (HTTP/3)", "WebTransport (QUIC)"),
                     selectedIndex = when (transportMode) {
                         EWPNode.TransportMode.WS -> 0
                         EWPNode.TransportMode.GRPC -> 1
                         EWPNode.TransportMode.XHTTP -> 2
                         EWPNode.TransportMode.H3GRPC -> 3
+                        EWPNode.TransportMode.WEBTRANSPORT -> 4
                     },
                     onSelectionChange = {
                         transportMode = when (it) {
                             0 -> EWPNode.TransportMode.WS
                             1 -> EWPNode.TransportMode.GRPC
                             2 -> EWPNode.TransportMode.XHTTP
-                            else -> EWPNode.TransportMode.H3GRPC
+                            3 -> EWPNode.TransportMode.H3GRPC
+                            else -> EWPNode.TransportMode.WEBTRANSPORT
                         }
                     }
                 )
@@ -325,6 +329,16 @@ fun NodeEditScreen(
                             onValueChange = { contentType = it },
                             label = { Text("Content-Type") },
                             placeholder = { Text("留空使用默认（仅 H3gRPC 有效）") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                    EWPNode.TransportMode.WEBTRANSPORT -> {
+                        OutlinedTextField(
+                            value = wtPath,
+                            onValueChange = { wtPath = it },
+                            label = { Text("路径 (Path)") },
+                            placeholder = { Text("/wt") },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
