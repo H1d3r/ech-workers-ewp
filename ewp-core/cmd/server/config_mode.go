@@ -261,15 +261,19 @@ func startWebTransportListener(cfg *option.ServerConfig, tlsConfig *tls.Config) 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", disguiseHandler)
 
+	h3Server := &http3.Server{
+		Addr:       addr,
+		Handler:    mux,
+		TLSConfig:  tlsConfig,
+		QUICConfig: quicConfig,
+	}
+
 	wtServer := &wtransport.Server{
-		H3: &http3.Server{
-			Addr:       addr,
-			Handler:    mux,
-			TLSConfig:  tlsConfig,
-			QUICConfig: quicConfig,
-		},
+		H3:          h3Server,
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
+
+	wtransport.ConfigureHTTP3Server(h3Server)
 
 	mux.Handle(wtPath, ewpwt.NewHandler(wtServer, enableFlow))
 	log.Info("WebTransport handler registered (path: %s)", wtPath)

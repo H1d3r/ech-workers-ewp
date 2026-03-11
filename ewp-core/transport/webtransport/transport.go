@@ -16,6 +16,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	wtransport "github.com/quic-go/webtransport-go"
+	"golang.org/x/sync/singleflight"
 )
 
 // Transport implements transport.Transport over WebTransport (QUIC + HTTP/3 + EWP).
@@ -23,6 +24,10 @@ import (
 // A single QUIC connection (webtransport.Session) is shared across all Dial()
 // calls: each Dial() opens a new bidi stream on the existing session.
 // When the session breaks it is transparently replaced on the next Dial().
+//
+// Reconnect storms are prevented via singleflight: only one goroutine performs
+// the QUIC handshake at a time; all others wait for the shared result.
+// Exponential backoff prevents tight retry loops in TUN mode.
 type Transport struct {
 	serverAddr   string // "host:port"
 	path         string // HTTP path, e.g. "/wt"
@@ -40,6 +45,12 @@ type Transport struct {
 	quicConfig *quic.Config
 	dialer     *wtransport.Dialer
 	sess       *wtransport.Session
+
+	// reconnect serialisation & backoff
+	sfGroup       singleflight.Group
+	backoffMu     sync.Mutex
+	backoffUntil  time.Time
+	backoffDelay  time.Duration
 }
 
 // New creates a WebTransport client transport.
@@ -226,6 +237,7 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 }
 
 func (t *Transport) openStream() (*wtransport.Stream, error) {
+	// Fast path: use the existing live session.
 	t.mu.Lock()
 	sess := t.sess
 	t.mu.Unlock()
@@ -236,21 +248,83 @@ func (t *Transport) openStream() (*wtransport.Stream, error) {
 			return stream, nil
 		}
 		log.V("[WebTransport] Session broken (%v), reconnecting", err)
+		// Only nil out sess if it's still the one we observed (avoid clobbering
+		// a session that another goroutine already replaced).
 		t.mu.Lock()
-		t.sess = nil
+		if t.sess == sess {
+			t.sess = nil
+		}
 		t.mu.Unlock()
 	}
 
-	sess, err := t.connect()
+	// Check backoff before attempting to reconnect.
+	if err := t.waitBackoff(); err != nil {
+		return nil, err
+	}
+
+	// Singleflight: only one goroutine initiates the QUIC handshake at a time.
+	// All concurrent callers share the single result (success or error).
+	v, err, _ := t.sfGroup.Do("connect", func() (interface{}, error) {
+		s, err := t.connect()
+		if err != nil {
+			t.recordBackoffFailure()
+			return nil, err
+		}
+		t.resetBackoff()
+		return s, nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
+	sess = v.(*wtransport.Session)
 	stream, err := sess.OpenStreamSync(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("open stream after reconnect: %w", err)
 	}
 	return stream, nil
+}
+
+const (
+	backoffInitial = 500 * time.Millisecond
+	backoffMax     = 30 * time.Second
+	backoffMult    = 2
+)
+
+// waitBackoff blocks until the current backoff window expires.
+// Returns an error only if the context is cancelled (future: ctx propagation).
+func (t *Transport) waitBackoff() error {
+	t.backoffMu.Lock()
+	until := t.backoffUntil
+	t.backoffMu.Unlock()
+
+	if d := time.Until(until); d > 0 {
+		log.V("[WebTransport] Backoff: waiting %v before reconnect", d.Round(time.Millisecond))
+		time.Sleep(d)
+	}
+	return nil
+}
+
+func (t *Transport) recordBackoffFailure() {
+	t.backoffMu.Lock()
+	defer t.backoffMu.Unlock()
+	if t.backoffDelay == 0 {
+		t.backoffDelay = backoffInitial
+	} else {
+		t.backoffDelay *= backoffMult
+		if t.backoffDelay > backoffMax {
+			t.backoffDelay = backoffMax
+		}
+	}
+	t.backoffUntil = time.Now().Add(t.backoffDelay)
+	log.V("[WebTransport] Backoff: next retry in %v", t.backoffDelay)
+}
+
+func (t *Transport) resetBackoff() {
+	t.backoffMu.Lock()
+	t.backoffDelay = 0
+	t.backoffUntil = time.Time{}
+	t.backoffMu.Unlock()
 }
 
 func (t *Transport) connect() (*wtransport.Session, error) {
