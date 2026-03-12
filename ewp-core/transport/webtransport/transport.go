@@ -142,15 +142,19 @@ func (t *Transport) initDialer() error {
 	t.tlsConfig = stdTLS
 
 	t.quicConfig = &quic.Config{
-		InitialStreamReceiveWindow:        6 * 1024 * 1024,
-		MaxStreamReceiveWindow:            16 * 1024 * 1024,
-		InitialConnectionReceiveWindow:    15 * 1024 * 1024,
-		MaxConnectionReceiveWindow:        25 * 1024 * 1024,
-		MaxIdleTimeout:                    t.idleTimeout,
-		KeepAlivePeriod:                   10 * time.Second,
-		EnableDatagrams:                   true, // required by WebTransport spec
-		Allow0RTT:                         true,
-		EnableStreamResetPartialDelivery:  true,
+		// Stream window: 32 MB per stream — sufficient for 1 Gbps × 250 ms BDP.
+		InitialStreamReceiveWindow: 8 * 1024 * 1024,
+		MaxStreamReceiveWindow:     32 * 1024 * 1024,
+		// Connection window: 200 MB — all proxy streams share one QUIC connection.
+		// Must exceed (concurrent streams × MaxStreamReceiveWindow) to avoid
+		// connection-level flow control becoming the throughput bottleneck.
+		InitialConnectionReceiveWindow:   32 * 1024 * 1024,
+		MaxConnectionReceiveWindow:       200 * 1024 * 1024,
+		MaxIdleTimeout:                   t.idleTimeout,
+		KeepAlivePeriod:                  10 * time.Second,
+		EnableDatagrams:                  true,
+		Allow0RTT:                        true,
+		EnableStreamResetPartialDelivery: true,
 	}
 
 	d := &wtransport.Dialer{

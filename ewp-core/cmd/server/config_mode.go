@@ -250,14 +250,18 @@ func startWebTransportListener(cfg *option.ServerConfig, tlsConfig *tls.Config) 
 	}
 
 	quicConfig := &quic.Config{
-		MaxIdleTimeout:                    60 * time.Second,
-		KeepAlivePeriod:                   20 * time.Second,
-		InitialStreamReceiveWindow:        6 * 1024 * 1024,
-		MaxStreamReceiveWindow:            16 * 1024 * 1024,
-		InitialConnectionReceiveWindow:    15 * 1024 * 1024,
-		MaxConnectionReceiveWindow:        25 * 1024 * 1024,
-		EnableDatagrams:                   true,
-		EnableStreamResetPartialDelivery:  true,
+		MaxIdleTimeout:  60 * time.Second,
+		KeepAlivePeriod: 20 * time.Second,
+		// Stream window: 32 MB per stream — covers 1 Gbps × 250 ms BDP.
+		InitialStreamReceiveWindow: 8 * 1024 * 1024,
+		MaxStreamReceiveWindow:     32 * 1024 * 1024,
+		// Connection window: 200 MB — all streams multiplexed over one QUIC
+		// connection; must be ≥ (concurrent streams × MaxStreamReceiveWindow)
+		// to prevent connection-level flow control from throttling streams.
+		InitialConnectionReceiveWindow: 32 * 1024 * 1024,
+		MaxConnectionReceiveWindow:     200 * 1024 * 1024,
+		EnableDatagrams:                true,
+		EnableStreamResetPartialDelivery: true,
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Listener.Address, cfg.Listener.Port)

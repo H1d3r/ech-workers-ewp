@@ -44,7 +44,7 @@ func NewTunnelForwarder(transport TransportAdapter, remote net.Conn, flowState *
 		flowState: flowState,
 		bufferPool: &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, 32*1024)
+				return make([]byte, 64*1024)
 			},
 		},
 		enableFlow: flowState != nil,
