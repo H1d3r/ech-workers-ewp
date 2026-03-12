@@ -11,6 +11,12 @@ import (
 	wtransport "github.com/quic-go/webtransport-go"
 )
 
+// sessionContext is a long-lived context for WebTransport session loops.
+// We use Background instead of r.Context() to prevent HTTP/3 stream-level
+// lifecycle events (H3 CONNECT stream teardown, request timeout) from
+// prematurely cancelling AcceptStream and killing the session.
+var sessionContext = context.Background()
+
 // Handler is an HTTP handler that upgrades WebTransport sessions and routes
 // each accepted bidi stream as a protocol tunnel connection.
 type Handler struct {
@@ -37,12 +43,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientIP := r.RemoteAddr
-	log.V("[WebTransport] Session opened from %s", clientIP)
+	log.Info("[WebTransport] Session opened from %s", clientIP)
 
 	for {
-		stream, err := sess.AcceptStream(r.Context())
+		stream, err := sess.AcceptStream(sessionContext)
 		if err != nil {
-			log.V("[WebTransport] Session closed for %s: %v", clientIP, err)
+			log.Info("[WebTransport] Session closed for %s: %v", clientIP, err)
 			return
 		}
 		go h.handleStream(stream, clientIP)

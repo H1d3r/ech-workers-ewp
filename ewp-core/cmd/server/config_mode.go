@@ -250,8 +250,12 @@ func startWebTransportListener(cfg *option.ServerConfig, tlsConfig *tls.Config) 
 	}
 
 	quicConfig := &quic.Config{
-		MaxIdleTimeout:  60 * time.Second,
+		MaxIdleTimeout:  90 * time.Second,
 		KeepAlivePeriod: 20 * time.Second,
+		// Allow many concurrent WebTransport bidi streams per QUIC connection.
+		// Default (100) is too low when clients open many concurrent tunnels.
+		MaxIncomingStreams:    512,
+		MaxIncomingUniStreams: 16,
 		// Stream window: 32 MB per stream — covers 1 Gbps × 250 ms BDP.
 		InitialStreamReceiveWindow: 8 * 1024 * 1024,
 		MaxStreamReceiveWindow:     32 * 1024 * 1024,

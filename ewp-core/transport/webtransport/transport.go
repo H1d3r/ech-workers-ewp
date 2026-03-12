@@ -142,6 +142,9 @@ func (t *Transport) initDialer() error {
 	t.tlsConfig = stdTLS
 
 	t.quicConfig = &quic.Config{
+		// Allow many concurrent WebTransport bidi streams per QUIC connection.
+		MaxIncomingStreams:    512,
+		MaxIncomingUniStreams: 16,
 		// Stream window: 32 MB per stream — sufficient for 1 Gbps × 250 ms BDP.
 		InitialStreamReceiveWindow: 8 * 1024 * 1024,
 		MaxStreamReceiveWindow:     32 * 1024 * 1024,
@@ -150,7 +153,7 @@ func (t *Transport) initDialer() error {
 		// connection-level flow control becoming the throughput bottleneck.
 		InitialConnectionReceiveWindow:   32 * 1024 * 1024,
 		MaxConnectionReceiveWindow:       200 * 1024 * 1024,
-		MaxIdleTimeout:                   t.idleTimeout,
+		MaxIdleTimeout:                   90 * time.Second,
 		KeepAlivePeriod:                  10 * time.Second,
 		EnableDatagrams:                  true,
 		Allow0RTT:                        true,
