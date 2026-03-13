@@ -85,7 +85,9 @@ func NewHandshakeRequest(uuid [16]byte, command byte, addr Address) *HandshakeRe
 		Options:       0,
 		PaddingLength: paddingLen,
 	}
-	rand.Read(req.Nonce[:])
+	if _, err := rand.Read(req.Nonce[:]); err != nil {
+		panic("ewp: crypto/rand failed: " + err.Error())
+	}
 	return req
 }
 

@@ -45,16 +45,21 @@ type Transport struct {
 	udpTemplate  *uritemplate.Template
 	bypassCfg    *transport.BypassConfig
 
-	mu         sync.Mutex
-	tlsConfig  *tls.Config
-	quicConfig *quic.Config
-	quicConn   *quic.Conn
-	clientConn *http3.ClientConn
+	mu          sync.Mutex
+	tlsConfig   *tls.Config
+	quicConfig  *quic.Config
+	quicConn    *quic.Conn
+	clientConn  *http3.ClientConn
+	h3Transport *http3.Transport // held so it can be closed on reconnect (M-1)
 
 	sfGroup      singleflight.Group
 	backoffMu    sync.Mutex
 	backoffUntil time.Time
 	backoffDelay time.Duration
+
+	// stopCh is closed by Close() to unblock waitBackoff and stop reconnect loops (M-2).
+	stopOnce sync.Once
+	stopCh   chan struct{}
 }
 
 // New creates a MASQUE client transport.
@@ -84,6 +89,7 @@ func New(serverAddr, uuidStr, udpTemplateStr string, useECH, useMozillaCA, enabl
 		enablePQC:    enablePQC,
 		echManager:   echManager,
 		udpTemplate:  tmpl,
+		stopCh:       make(chan struct{}),
 	}
 
 	if err := t.initConfigs(); err != nil {
@@ -151,12 +157,20 @@ func (t *Transport) Name() string {
 }
 
 // SetSNI overrides the TLS SNI.
+// If the new TLS config cannot be built, the SNI is reverted and the existing
+// connection is kept alive (H-1: prevents silently entering a broken state).
 func (t *Transport) SetSNI(sni string) *Transport {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	prev := t.sni
 	t.sni = sni
+	if err := t.initConfigs(); err != nil {
+		log.V("[MASQUE] SetSNI: initConfigs failed (%v), reverting to %q", err, prev)
+		t.sni = prev
+		_ = t.initConfigs()
+		return t
+	}
 	t.dropConn()
-	t.initConfigs()
 	return t
 }
 
@@ -176,8 +190,22 @@ func (t *Transport) SetBypassConfig(cfg *transport.BypassConfig) {
 // dropConn invalidates the current connection so the next Dial() reconnects.
 // Must be called with mu held.
 func (t *Transport) dropConn() {
+	if t.h3Transport != nil {
+		t.h3Transport.Close()
+		t.h3Transport = nil
+	}
 	t.quicConn = nil
 	t.clientConn = nil
+}
+
+// Close shuts down the transport, unblocking any pending backoff and closing
+// the underlying QUIC connection (M-2, M-4).
+func (t *Transport) Close() error {
+	t.stopOnce.Do(func() { close(t.stopCh) })
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.dropConn()
+	return nil
 }
 
 // Dial returns a TunnelConn backed by an HTTP/3 stream on the shared QUIC connection.
@@ -273,22 +301,30 @@ func (t *Transport) connect() (*http3.ClientConn, error) {
 	select {
 	case <-cc.ReceivedSettings():
 	case <-cc.Context().Done():
+		h3tr.Close()
 		return nil, errors.New("masque: connection closed before settings received")
 	case <-ctx.Done():
+		h3tr.Close()
 		return nil, context.Cause(ctx)
 	}
 
 	settings := cc.Settings()
 	if !settings.EnableDatagrams {
+		h3tr.Close()
 		qconn.CloseWithError(0, "")
 		return nil, errors.New("masque: server did not enable QUIC datagrams")
 	}
 	if !settings.EnableExtendedConnect {
+		h3tr.Close()
 		qconn.CloseWithError(0, "")
 		return nil, errors.New("masque: server did not enable Extended CONNECT")
 	}
 
 	t.mu.Lock()
+	if old := t.h3Transport; old != nil {
+		old.Close()
+	}
+	t.h3Transport = h3tr
 	t.quicConn = qconn
 	t.clientConn = cc
 	t.mu.Unlock()
@@ -325,7 +361,11 @@ func (t *Transport) waitBackoff() error {
 	t.backoffMu.Unlock()
 	if d := time.Until(until); d > 0 {
 		log.V("[MASQUE] Backoff: waiting %v", d.Round(time.Millisecond))
-		time.Sleep(d)
+		select {
+		case <-time.After(d):
+		case <-t.stopCh:
+			return errors.New("masque: transport closed")
+		}
 	}
 	return nil
 }

@@ -23,6 +23,10 @@ type udpSession struct {
 	remoteAddr netip.AddrPort // the remote server addr (responses appear to come FROM here)
 	lastActive atomic.Int64  // UnixNano; updated on every packet, read by cleanup goroutine
 
+	// closeOnce ensures tunnelConn.Close is called exactly once regardless of whether
+	// cleanupUDPSessions or udpReadLoop closes the session first (M-7).
+	closeOnce sync.Once
+
 	// serverRealIP is the real IP of the first responder (typically the STUN/target server).
 	// Set once by udpReadLoop on first packet. Responses from this IP are masked back to
 	// the original FakeIP (remoteAddr) so the app sees the same src it sent to.
@@ -34,6 +38,11 @@ type udpSession struct {
 	// Used to eagerly release their FakeIP slots when the session closes.
 	seenPeersMu sync.Mutex
 	seenPeers   map[netip.Addr]struct{}
+}
+
+// close is idempotent; safe to call from both cleanupUDPSessions and udpReadLoop.
+func (s *udpSession) close() {
+	s.closeOnce.Do(func() { s.tunnelConn.Close() })
 }
 
 // UDPWriter allows the handler to write responses back to the TUN virtual device
@@ -198,6 +207,12 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 	// Each unique flow (5-tuple) gets its own tunnel connection so that:
 	//   - MASQUE: each ConnectUDP binds to exactly one target (RFC 9298 semantics)
 	//   - EWP/Trojan: independent streams per flow (better isolation, no change in correctness)
+	//
+	// ConnectUDP is completed BEFORE LoadOrStore to guarantee that any goroutine
+	// that observes the session via Load can safely call WriteUDP immediately
+	// (C-2: eliminates the TOCTOU race between LoadOrStore and ConnectUDP).
+	// In the rare case two goroutines race, both do ConnectUDP and only one wins
+	// the LoadOrStore; the loser's stream is closed immediately — safe and correct.
 	key := udpSessionKey{src: src, dst: dst}
 	val, ok := h.udpSessions.Load(key)
 	var session *udpSession
@@ -206,6 +221,14 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		tunnelConn, err := h.transport.Dial()
 		if err != nil {
 			log.Printf("[TUN UDP] Tunnel dial failed for %s: %v", src, err)
+			return
+		}
+
+		log.V("[TUN UDP] New session: %s -> %s", src, dst)
+
+		if err := tunnelConn.ConnectUDP(endpoint, nil); err != nil {
+			log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
+			tunnelConn.Close()
 			return
 		}
 
@@ -220,15 +243,6 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 			tunnelConn.Close()
 			session = actual.(*udpSession)
 		} else {
-			log.V("[TUN UDP] New session: %s -> %s", src, dst)
-
-			if err := tunnelConn.ConnectUDP(endpoint, nil); err != nil {
-				log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
-				tunnelConn.Close()
-				h.udpSessions.Delete(key)
-				return
-			}
-
 			go h.udpReadLoop(key, session)
 		}
 	} else {
@@ -247,7 +261,7 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 func (h *Handler) udpReadLoop(key udpSessionKey, session *udpSession) {
 	tunClientSrc := key.src
 	defer h.udpSessions.Delete(key)
-	defer session.tunnelConn.Close()
+	defer session.close()
 
 	// Eagerly release the cached write-side conn when the session ends.
 	if h.udpWriter != nil && session.remoteAddr.IsValid() {
@@ -358,8 +372,8 @@ func (h *Handler) cleanupUDPSessions() {
 				if session.lastActive.Load() < cutoff {
 					sk := k.(udpSessionKey)
 					log.V("[TUN UDP] Cleanup inactive session: %s -> %s", sk.src, sk.dst)
-					session.tunnelConn.Close()
 					h.udpSessions.Delete(k)
+					session.close()
 				}
 				return true
 			})

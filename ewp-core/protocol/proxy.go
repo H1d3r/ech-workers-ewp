@@ -61,21 +61,23 @@ func (h *TunnelHandler) HandleTunnel(conn net.Conn, target string, clientAddr st
 
 	log.V("[Proxy] %s connected: %s", clientAddr, target)
 
-	done := make(chan bool, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	go func() {
+		defer wg.Done()
 		buf := largeBufferPool.Get().([]byte)
 		defer largeBufferPool.Put(buf)
 
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				done <- true
+				tunnelConn.Close()
 				return
 			}
 
 			if err := tunnelConn.Write(buf[:n]); err != nil {
-				done <- true
+				conn.Close()
 				return
 			}
 			atomic.AddInt64(&totalUpload, int64(n))
@@ -83,25 +85,26 @@ func (h *TunnelHandler) HandleTunnel(conn net.Conn, target string, clientAddr st
 	}()
 
 	go func() {
+		defer wg.Done()
 		buf := largeBufferPool.Get().([]byte)
 		defer largeBufferPool.Put(buf)
 
 		for {
 			n, err := tunnelConn.Read(buf)
 			if err != nil {
-				done <- true
+				conn.Close()
 				return
 			}
 
 			if _, err := conn.Write(buf[:n]); err != nil {
-				done <- true
+				tunnelConn.Close()
 				return
 			}
 			atomic.AddInt64(&totalDownload, int64(n))
 		}
 	}()
 
-	<-done
+	wg.Wait()
 	log.V("[Proxy] %s disconnected: %s", clientAddr, target)
 	return nil
 }

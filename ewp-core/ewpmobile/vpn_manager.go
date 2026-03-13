@@ -401,25 +401,32 @@ func (vm *vpnManager) Stop() error {
 
 	log.Printf("[VPNManager] Stopping VPN...")
 
-	// 停止网络栈
+	// 1. 先取消上下文，让 cleanupUDPSessions 等 goroutine 及时退出 (M-3)
+	if vm.cancel != nil {
+		vm.cancel()
+		vm.cancel = nil
+	}
+
+	// 2. 关闭网络栈（在 context 取消之后，避免 cleanup goroutine 访问已关闭的 stack）
 	if vm.tunStack != nil {
 		vm.tunStack.Close()
 		vm.tunStack = nil
 	}
 
-	// 关闭 TUN 设备
+	// 3. 关闭 TUN 设备
 	if vm.tunDevice != nil {
 		vm.tunDevice.Close()
 		vm.tunDevice = nil
 	}
 
-	// 取消上下文
-	if vm.cancel != nil {
-		vm.cancel()
-	}
-
-	// 清空传输层引用
+	// 4. 关闭传输层，发送 CONNECTION_CLOSE 帧给对端 (M-4)
 	if vm.transport != nil {
+		type closer interface{ Close() error }
+		if c, ok := vm.transport.(closer); ok {
+			if err := c.Close(); err != nil {
+				log.Printf("[VPNManager] Transport close: %v", err)
+			}
+		}
 		vm.transport = nil
 	}
 

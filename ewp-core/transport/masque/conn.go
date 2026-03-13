@@ -47,6 +47,10 @@ var udpWritePool = sync.Pool{
 //                                 per RFC 9298 (context-id=0 prefix).
 type Conn struct {
 	clientConn *http3.ClientConn
+	// connCtx is the QUIC connection's context; cancelled when the connection is lost.
+	// Used as the context for ReceiveDatagram so that goroutines blocked on datagram
+	// reads are unblocked when the connection dies (H-2: prevents goroutine leaks).
+	connCtx    context.Context
 	uuid       [16]byte
 	template   *uritemplate.Template
 
@@ -56,7 +60,7 @@ type Conn struct {
 }
 
 func newConn(cc *http3.ClientConn, uuid [16]byte, tmpl *uritemplate.Template) *Conn {
-	return &Conn{clientConn: cc, uuid: uuid, template: tmpl}
+	return &Conn{clientConn: cc, connCtx: cc.Context(), uuid: uuid, template: tmpl}
 }
 
 // ── TCP ──────────────────────────────────────────────────────────────────────
@@ -181,6 +185,7 @@ func (c *Conn) ConnectUDP(target transport.Endpoint, initialData []byte) error {
 		return fmt.Errorf("masque: read CONNECT-UDP response: %w", err)
 	}
 	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
+		rstr.CancelRead(quic.StreamErrorCode(http3.ErrCodeConnectError))
 		return fmt.Errorf("masque: CONNECT-UDP rejected: %d", rsp.StatusCode)
 	}
 
@@ -217,8 +222,9 @@ func (c *Conn) WriteUDP(_ transport.Endpoint, data []byte) error {
 //
 // The returned slice is a sub-slice of the buffer allocated by ReceiveDatagram;
 // ownership transfers to the caller — no extra copy is made.
+// Blocks until a datagram arrives or the underlying QUIC connection is closed.
 func (c *Conn) ReadUDP() ([]byte, error) {
-	data, err := c.udpStream.ReceiveDatagram(context.Background())
+	data, err := c.udpStream.ReceiveDatagram(c.connCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -230,8 +236,9 @@ func (c *Conn) ReadUDP() ([]byte, error) {
 }
 
 // ReadUDPTo reads a UDP datagram payload into buf (zero-copy path).
+// Blocks until a datagram arrives or the underlying QUIC connection is closed.
 func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
-	data, err := c.udpStream.ReceiveDatagram(context.Background())
+	data, err := c.udpStream.ReceiveDatagram(c.connCtx)
 	if err != nil {
 		return 0, err
 	}

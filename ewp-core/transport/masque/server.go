@@ -19,8 +19,6 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
-var sessionCtx = context.Background()
-
 // Handler is an HTTP/3 request handler that serves the MASQUE protocol.
 //
 // It handles two request types on the same HTTP/3 server:
@@ -96,7 +94,7 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dialCtx, cancel := context.WithTimeout(sessionCtx, 10*time.Second)
+	dialCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	remote, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", target)

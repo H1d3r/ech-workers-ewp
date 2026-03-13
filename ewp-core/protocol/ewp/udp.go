@@ -400,13 +400,17 @@ func (m *UDPSessionManager) Close() {
 var globalIDBaseKey [32]byte
 
 func init() {
-	crand.Read(globalIDBaseKey[:])
+	if _, err := crand.Read(globalIDBaseKey[:]); err != nil {
+		panic("ewp: crypto/rand failed: " + err.Error())
+	}
 }
 
 // NewGlobalID 生成一个新的随机 GlobalID (客户端 UDP 会话使用)
 func NewGlobalID() [8]byte {
 	var id [8]byte
-	crand.Read(id[:])
+	if _, err := crand.Read(id[:]); err != nil {
+		panic("ewp: crypto/rand failed: " + err.Error())
+	}
 	return id
 }
 

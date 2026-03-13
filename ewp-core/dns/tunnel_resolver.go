@@ -291,7 +291,8 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 
 	// Use a generous timeout for connection setup (Dial + CONNECT + TLS).
 	// This is separate from the per-query timeout since first-time setup is slow.
-	connCtx, connCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Respect the caller's context so cancellation propagates (M-6).
+	connCtx, connCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer connCancel()
 
 	// Step 1: Dial tunnel
@@ -328,7 +329,9 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 	}
 
 	// Build HTTP client that reuses this single persistent connection.
-	connReady := true
+	// sync.Once guarantees the pre-established conn is delivered exactly once
+	// even if http.Transport calls DialTLSContext/DialContext concurrently (H-4).
+	var dialOnce sync.Once
 	httpTransport := &http.Transport{
 		MaxIdleConns:        1,
 		MaxIdleConnsPerHost: 1,
@@ -337,17 +340,19 @@ func (r *TunnelDNSResolver) ensureConnected(ctx context.Context) (*http.Client, 
 	}
 	if r.useHTTPS {
 		httpTransport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if connReady {
-				connReady = false
-				return netConn, nil
+			var conn net.Conn
+			dialOnce.Do(func() { conn = netConn })
+			if conn != nil {
+				return conn, nil
 			}
 			return nil, fmt.Errorf("connection lost")
 		}
 	} else {
 		httpTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if connReady {
-				connReady = false
-				return netConn, nil
+			var conn net.Conn
+			dialOnce.Do(func() { conn = netConn })
+			if conn != nil {
+				return conn, nil
 			}
 			return nil, fmt.Errorf("connection lost")
 		}

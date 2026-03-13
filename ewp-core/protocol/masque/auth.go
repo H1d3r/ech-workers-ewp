@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"net/http"
 	"time"
 )
@@ -63,7 +62,8 @@ func ValidateAuthHeader(h http.Header, validUUIDs [][16]byte) ([16]byte, error) 
 
 	ts := binary.BigEndian.Uint32(decoded[16:20])
 	now := time.Now().Unix()
-	if math.Abs(float64(int64(ts)-now)) > TimeWindow {
+	diff := int64(ts) - now
+	if diff < -TimeWindow || diff > TimeWindow {
 		return [16]byte{}, fmt.Errorf("masque auth: timestamp out of window")
 	}
 
