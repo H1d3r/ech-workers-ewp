@@ -321,14 +321,11 @@ func startMasqueListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 		EnableDatagrams:                true,
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/", handler)
-
 	h3Server := &http3.Server{
-		Addr:           addr,
-		Handler:        mux,
-		TLSConfig:      tlsConfig,
-		QUICConfig:     quicConfig,
+		Addr:            addr,
+		Handler:         handler,
+		TLSConfig:       tlsConfig,
+		QUICConfig:      quicConfig,
 		EnableDatagrams: true,
 	}
 
