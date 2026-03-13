@@ -31,6 +31,14 @@ type ListenerConfig struct {
 	// Default: "/masque/{target_host}/{target_port}"
 	// The Handler is also registered at "/" to accept plain HTTP CONNECT (TCP tunnels).
 	MasquePath string `json:"masque_path,omitempty"`
+
+	// MasqueHost is the public hostname (and optional port) used in the MASQUE URI template.
+	// masquego validates that the client's :authority header matches the template host exactly,
+	// so this must be the domain name clients connect to — NOT the bind address (0.0.0.0).
+	// Example: "example.com" or "example.com:443"
+	// If empty, the host is auto-detected from the TLS certificate's first SAN/CN.
+	// Falls back to the listen address when TLS is unavailable.
+	MasqueHost string `json:"masque_host,omitempty"`
 }
 
 // ProtocolConfig defines protocol settings

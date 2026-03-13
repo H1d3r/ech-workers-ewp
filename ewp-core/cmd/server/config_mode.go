@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"os"
@@ -238,6 +240,52 @@ func loadTLSConfig(cfg *option.ServerTLSConfig) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// resolveMasqueHost returns the public hostname to embed in the MASQUE URI template.
+//
+// masquego.ParseRequest validates that the client's :authority header equals the
+// template host exactly.  The listen address (0.0.0.0 / ::) is never reachable by
+// clients, so we must use the real public domain instead.
+//
+// Priority:
+//  1. cfg.Listener.MasqueHost — explicit override in config
+//  2. First SAN / CN from the TLS certificate (automatic, zero config)
+//  3. cfg.Listener.Address — fallback for non-wildcard bind addresses
+func resolveMasqueHost(cfg *option.ServerConfig) string {
+	if cfg.Listener.MasqueHost != "" {
+		return cfg.Listener.MasqueHost
+	}
+
+	if cfg.TLS != nil && cfg.TLS.CertFile != "" {
+		if host := firstSANFromCert(cfg.TLS.CertFile); host != "" {
+			log.Info("MASQUE: auto-detected public host from TLS cert: %s", host)
+			return host
+		}
+	}
+
+	return cfg.Listener.Address
+}
+
+// firstSANFromCert reads the first PEM certificate block from certFile and
+// returns its first DNS SAN (or Common Name as fallback).
+func firstSANFromCert(certFile string) string {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return ""
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return ""
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return ""
+	}
+	if len(cert.DNSNames) > 0 {
+		return cert.DNSNames[0]
+	}
+	return cert.Subject.CommonName
+}
+
 func startMasqueListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 	if tlsConfig == nil {
 		log.Fatalf("MASQUE requires TLS to be enabled")
@@ -248,8 +296,11 @@ func startMasqueListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 		masquePath = "/masque/{target_host}/{target_port}"
 	}
 
-	addr := fmt.Sprintf("%s:%d", cfg.Listener.Address, cfg.Listener.Port)
-	udpTemplateURL := fmt.Sprintf("https://%s%s", addr, masquePath)
+	publicHost := resolveMasqueHost(cfg)
+	port := cfg.Listener.Port
+	templateHost := fmt.Sprintf("%s:%d", publicHost, port)
+	addr := fmt.Sprintf("%s:%d", cfg.Listener.Address, port)
+	udpTemplateURL := fmt.Sprintf("https://%s%s", templateHost, masquePath)
 
 	uuids := []string{cfg.Protocol.UUID}
 
