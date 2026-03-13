@@ -274,10 +274,11 @@ func startMasqueListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 	mux.Handle("/", handler)
 
 	h3Server := &http3.Server{
-		Addr:       addr,
-		Handler:    mux,
-		TLSConfig:  tlsConfig,
-		QUICConfig: quicConfig,
+		Addr:           addr,
+		Handler:        mux,
+		TLSConfig:      tlsConfig,
+		QUICConfig:     quicConfig,
+		EnableDatagrams: true,
 	}
 
 	log.Info("MASQUE listening on %s (UDP template: %s)", addr, udpTemplateURL)
