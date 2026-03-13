@@ -71,6 +71,8 @@ EWPNode ShareLink::parseLink(const QString &link)
         node.transportMode = EWPNode::H3GRPC;
     } else if (mode == "xhttp") {
         node.transportMode = EWPNode::XHTTP;
+    } else if (mode == "masque") {
+        node.transportMode = EWPNode::MASQUE;
     } else {
         node.transportMode = EWPNode::WS;
     }
@@ -79,6 +81,12 @@ EWPNode ShareLink::parseLink(const QString &link)
     QString wsPath = query.queryItemValue("wsPath");
     if (!wsPath.isEmpty()) {
         node.wsPath = wsPath;
+    }
+
+    // MASQUE 路径模板
+    QString masquePath = query.queryItemValue("masquePath");
+    if (!masquePath.isEmpty()) {
+        node.masquePath = masquePath;
     }
     
     // gRPC / H3gRPC 服务名
@@ -164,6 +172,12 @@ QString ShareLink::generateLink(const EWPNode &node)
             break;
         case EWPNode::XHTTP:
             query.addQueryItem("mode", "xhttp");
+            break;
+        case EWPNode::MASQUE:
+            query.addQueryItem("mode", "masque");
+            if (node.masquePath != "/masque/{target_host}/{target_port}") {
+                query.addQueryItem("masquePath", node.masquePath);
+            }
             break;
         default:
             query.addQueryItem("mode", "ws");

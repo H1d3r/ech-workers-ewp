@@ -45,7 +45,7 @@ fun NodeEditScreen(
     var xhttpMode by remember { mutableStateOf(existingNode?.xhttpMode ?: "auto") }
     var userAgent by remember { mutableStateOf(existingNode?.userAgent ?: "") }
     var contentType by remember { mutableStateOf(existingNode?.contentType ?: "") }
-    var wtPath by remember { mutableStateOf(existingNode?.wtPath ?: "/wt") }
+    var masquePath by remember { mutableStateOf(existingNode?.masquePath ?: "/masque/{target_host}/{target_port}") }
 
     var enableTLS by remember { mutableStateOf(existingNode?.enableTLS ?: true) }
     var sni by remember { mutableStateOf(existingNode?.sni ?: "") }
@@ -91,7 +91,7 @@ fun NodeEditScreen(
                                 xhttpMode = xhttpMode,
                                 userAgent = userAgent,
                                 contentType = contentType,
-                                wtPath = wtPath,
+                                masquePath = masquePath,
                                 sni = sni,
                                 enableTLS = enableTLS,
                                 minTLSVersion = minTLSVersion,
@@ -216,13 +216,13 @@ fun NodeEditScreen(
             ConfigCard(title = "传输配置") {
                 DropdownRow(
                     label = "传输协议",
-                    options = listOf("WebSocket", "gRPC (HTTP/2)", "XHTTP", "H3gRPC (HTTP/3)", "WebTransport (QUIC)"),
+                    options = listOf("WebSocket", "gRPC (HTTP/2)", "XHTTP", "H3gRPC (HTTP/3)", "MASQUE (QUIC Datagrams)"),
                     selectedIndex = when (transportMode) {
                         EWPNode.TransportMode.WS -> 0
                         EWPNode.TransportMode.GRPC -> 1
                         EWPNode.TransportMode.XHTTP -> 2
                         EWPNode.TransportMode.H3GRPC -> 3
-                        EWPNode.TransportMode.WEBTRANSPORT -> 4
+                        EWPNode.TransportMode.MASQUE -> 4
                     },
                     onSelectionChange = {
                         transportMode = when (it) {
@@ -230,7 +230,7 @@ fun NodeEditScreen(
                             1 -> EWPNode.TransportMode.GRPC
                             2 -> EWPNode.TransportMode.XHTTP
                             3 -> EWPNode.TransportMode.H3GRPC
-                            else -> EWPNode.TransportMode.WEBTRANSPORT
+                            else -> EWPNode.TransportMode.MASQUE
                         }
                     }
                 )
@@ -333,12 +333,12 @@ fun NodeEditScreen(
                             singleLine = true
                         )
                     }
-                    EWPNode.TransportMode.WEBTRANSPORT -> {
+                    EWPNode.TransportMode.MASQUE -> {
                         OutlinedTextField(
-                            value = wtPath,
-                            onValueChange = { wtPath = it },
-                            label = { Text("路径 (Path)") },
-                            placeholder = { Text("/wt") },
+                            value = masquePath,
+                            onValueChange = { masquePath = it },
+                            label = { Text("UDP 模板路径") },
+                            placeholder = { Text("/masque/{target_host}/{target_port}") },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )

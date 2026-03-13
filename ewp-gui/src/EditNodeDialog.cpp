@@ -58,7 +58,7 @@ void EditNodeDialog::setNode(const EWPNode &node)
     ui->comboXHTTPMode->setCurrentIndex(xhttpModeIndex);
     ui->editXHTTPPath->setText(node.xhttpPath);
 
-    ui->editWtPath->setText(node.wtPath);
+    ui->editMasquePath->setText(node.masquePath);
 
     ui->checkEnableTLS->setChecked(node.enableTLS);
     ui->editSNI->setText(node.sni);
@@ -107,8 +107,8 @@ EWPNode EditNodeDialog::getNode() const
     node.xhttpPath = ui->editXHTTPPath->text().trimmed();
     if (node.xhttpPath.isEmpty()) node.xhttpPath = "/xhttp";
 
-    node.wtPath = ui->editWtPath->text().trimmed();
-    if (node.wtPath.isEmpty()) node.wtPath = "/wt";
+    node.masquePath = ui->editMasquePath->text().trimmed();
+    if (node.masquePath.isEmpty()) node.masquePath = "/masque/{target_host}/{target_port}";
 
     node.enableTLS = ui->checkEnableTLS->isChecked();
     node.sni = ui->editSNI->text().trimmed();
@@ -186,7 +186,7 @@ void EditNodeDialog::updateVisibility()
     ui->labelContentType->setVisible(mode == EWPNode::H3GRPC);
     ui->editContentType->setVisible(mode == EWPNode::H3GRPC);
     ui->xhttpGroup->setVisible(mode == EWPNode::XHTTP);
-    ui->wtGroup->setVisible(mode == EWPNode::WEBTRANSPORT);
+    ui->masqueGroup->setVisible(mode == EWPNode::MASQUE);
 
     ui->editSNI->setEnabled(tlsEnabled);
     ui->checkEnablePQC->setEnabled(tlsEnabled);

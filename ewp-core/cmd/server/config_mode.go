@@ -14,11 +14,10 @@ import (
 	log "ewp-core/log"
 	"ewp-core/option"
 	pb "ewp-core/proto"
-	ewpwt "ewp-core/transport/webtransport"
+	masquetransport "ewp-core/transport/masque"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	wtransport "github.com/quic-go/webtransport-go"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
@@ -75,25 +74,25 @@ func startFromConfig(configPath string) {
 		log.Info("TLS enabled (ALPN: %v)", cfg.TLS.ALPN)
 	}
 
-	hasH3, hasWT := false, false
+	hasH3, hasMasque := false, false
 	for _, mode := range cfg.Listener.Modes {
 		switch mode {
 		case "h3":
 			hasH3 = true
-		case "webtransport":
-			hasWT = true
+		case "masque":
+			hasMasque = true
 		}
 	}
 
-	if hasH3 || hasWT {
+	if hasH3 || hasMasque {
 		altSvcHeader = fmt.Sprintf(`h3=":%d"; ma=86400`, cfg.Listener.Port)
 	}
 
 	if hasH3 {
 		go startH3Listener(cfg, tlsConfig)
 	}
-	if hasWT {
-		go startWebTransportListener(cfg, tlsConfig)
+	if hasMasque {
+		go startMasqueListener(cfg, tlsConfig)
 	}
 
 	mux := createUnifiedHandler(cfg)
@@ -169,7 +168,7 @@ func createUnifiedHandler(cfg *option.ServerConfig) http.Handler {
 			mux.HandleFunc(xhttpPath, xhttpHandler)
 			log.Info("XHTTP handler registered (path: %s)", xhttpPath)
 
-		case "h3", "webtransport":
+		case "h3", "masque":
 			continue
 
 		default:
@@ -239,39 +238,40 @@ func loadTLSConfig(cfg *option.ServerTLSConfig) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-func startWebTransportListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
+func startMasqueListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 	if tlsConfig == nil {
-		log.Fatalf("WebTransport requires TLS to be enabled")
+		log.Fatalf("MASQUE requires TLS to be enabled")
 	}
 
-	wtPath := cfg.Listener.WTPath
-	if wtPath == "" {
-		wtPath = "/wt"
-	}
-
-	quicConfig := &quic.Config{
-		MaxIdleTimeout:  90 * time.Second,
-		KeepAlivePeriod: 20 * time.Second,
-		// Allow many concurrent WebTransport bidi streams per QUIC connection.
-		// Default (100) is too low when clients open many concurrent tunnels.
-		MaxIncomingStreams:    512,
-		MaxIncomingUniStreams: 16,
-		// Stream window: 32 MB per stream — covers 1 Gbps × 250 ms BDP.
-		InitialStreamReceiveWindow: 8 * 1024 * 1024,
-		MaxStreamReceiveWindow:     32 * 1024 * 1024,
-		// Connection window: 200 MB — all streams multiplexed over one QUIC
-		// connection; must be ≥ (concurrent streams × MaxStreamReceiveWindow)
-		// to prevent connection-level flow control from throttling streams.
-		InitialConnectionReceiveWindow: 32 * 1024 * 1024,
-		MaxConnectionReceiveWindow:     200 * 1024 * 1024,
-		EnableDatagrams:                true,
-		EnableStreamResetPartialDelivery: true,
+	masquePath := cfg.Listener.MasquePath
+	if masquePath == "" {
+		masquePath = "/masque/{target_host}/{target_port}"
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Listener.Address, cfg.Listener.Port)
+	udpTemplateURL := fmt.Sprintf("https://%s%s", addr, masquePath)
+
+	uuids := []string{cfg.Protocol.UUID}
+
+	handler, err := masquetransport.NewHandler(udpTemplateURL, uuids, newProtocolHandler)
+	if err != nil {
+		log.Fatalf("MASQUE: failed to create handler: %v", err)
+	}
+
+	quicConfig := &quic.Config{
+		MaxIdleTimeout:                 90 * time.Second,
+		KeepAlivePeriod:                10 * time.Second,
+		MaxIncomingStreams:              512,
+		MaxIncomingUniStreams:           16,
+		InitialStreamReceiveWindow:     8 * 1024 * 1024,
+		MaxStreamReceiveWindow:         32 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 32 * 1024 * 1024,
+		MaxConnectionReceiveWindow:     200 * 1024 * 1024,
+		EnableDatagrams:                true,
+	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", disguiseHandler)
+	mux.Handle("/", handler)
 
 	h3Server := &http3.Server{
 		Addr:       addr,
@@ -280,19 +280,10 @@ func startWebTransportListener(cfg *option.ServerConfig, tlsConfig *tls.Config) 
 		QUICConfig: quicConfig,
 	}
 
-	wtServer := &wtransport.Server{
-		H3:          h3Server,
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
+	log.Info("MASQUE listening on %s (UDP template: %s)", addr, udpTemplateURL)
 
-	wtransport.ConfigureHTTP3Server(h3Server)
-
-	mux.Handle(wtPath, ewpwt.NewHandler(wtServer, newProtocolHandler))
-	log.Info("WebTransport handler registered (path: %s)", wtPath)
-	log.Info("WebTransport listening on %s (UDP/QUIC)", addr)
-
-	if err := wtServer.ListenAndServe(); err != nil {
-		log.Fatalf("WebTransport server failed: %v", err)
+	if err := h3Server.ListenAndServe(); err != nil {
+		log.Fatalf("MASQUE server failed: %v", err)
 	}
 }
 

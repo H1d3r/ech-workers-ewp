@@ -15,8 +15,8 @@ import (
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
 	"ewp-core/transport/h3grpc"
+	masquetransport "ewp-core/transport/masque"
 	"ewp-core/transport/websocket"
-	"ewp-core/transport/webtransport"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
 	"ewp-core/tun/util"
@@ -209,20 +209,20 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			return nil, err
 		}
 
-	case "webtransport":
-		path := outbound.Transport.Path
-		if path == "" {
-			path = "/wt"
+	case "masque":
+		udpTemplatePath := outbound.Transport.UDPTemplatePath
+		if udpTemplatePath == "" {
+			udpTemplatePath = "/masque/{target_host}/{target_port}"
 		}
-		wtTrans, wtErr := webtransport.NewWithProtocol(
-			serverAddr, uuid, password,
-			useECH, useMozillaCA, enableFlow, enablePQC, useTrojan,
-			path, echMgr,
+		udpTemplate := fmt.Sprintf("https://%s%s", serverAddr, udpTemplatePath)
+		mTrans, mErr := masquetransport.New(
+			serverAddr, uuid, udpTemplate,
+			useECH, useMozillaCA, enablePQC, echMgr,
 		)
-		if wtErr != nil {
-			return nil, wtErr
+		if mErr != nil {
+			return nil, mErr
 		}
-		trans = wtTrans
+		trans = mTrans
 
 	default:
 		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
@@ -239,7 +239,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			t.SetAuthority(outbound.Host)
 		case *xhttp.Transport:
 			t.SetHost(outbound.Host)
-		case *webtransport.Transport:
+		case *masquetransport.Transport:
 			t.SetAuthority(outbound.Host)
 		}
 	}
@@ -262,7 +262,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			t.SetSNI(effectiveSNI)
 		case *xhttp.Transport:
 			t.SetSNI(effectiveSNI)
-		case *webtransport.Transport:
+		case *masquetransport.Transport:
 			t.SetSNI(effectiveSNI)
 		}
 	}

@@ -43,13 +43,21 @@ type UDPWriter interface {
 	ReleaseConn(src netip.AddrPort, dst netip.AddrPort)
 }
 
+// udpSessionKey identifies a unique UDP flow by (local src, remote dst).
+// Using both endpoints ensures one CONNECT-UDP stream per 5-tuple, which is
+// required for MASQUE (RFC 9298) and improves isolation for all transports.
+type udpSessionKey struct {
+	src netip.AddrPort
+	dst netip.AddrPort
+}
+
 type Handler struct {
 	transport  transport.Transport
 	ctx        context.Context
 	fakeIPPool *dns.FakeIPPool
 
 	udpWriter   UDPWriter
-	udpSessions sync.Map // map[netip.AddrPort]*udpSession
+	udpSessions sync.Map // map[udpSessionKey]*udpSession
 }
 
 func NewHandler(ctx context.Context, trans transport.Transport, udpWriter UDPWriter) *Handler {
@@ -186,13 +194,15 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		endpoint = transport.Endpoint{Addr: dst}
 	}
 
-	// Get or Create UDP tunnel session for the source IP:Port (NAT binding)
-	// Use netip.AddrPort directly as map key (comparable value type, zero allocation)
-	val, ok := h.udpSessions.Load(src)
+	// Get or create a UDP tunnel session keyed by (src, dst).
+	// Each unique flow (5-tuple) gets its own tunnel connection so that:
+	//   - MASQUE: each ConnectUDP binds to exactly one target (RFC 9298 semantics)
+	//   - EWP/Trojan: independent streams per flow (better isolation, no change in correctness)
+	key := udpSessionKey{src: src, dst: dst}
+	val, ok := h.udpSessions.Load(key)
 	var session *udpSession
 
 	if !ok {
-		// Create a new tunnel connection for this local UDP port
 		tunnelConn, err := h.transport.Dial()
 		if err != nil {
 			log.Printf("[TUN UDP] Tunnel dial failed for %s: %v", src, err)
@@ -201,31 +211,25 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 
 		session = &udpSession{
 			tunnelConn: tunnelConn,
-			remoteAddr: dst, // dst is always an IP (from gVisor), safe to store directly
+			remoteAddr: dst,
 		}
 		session.lastActive.Store(time.Now().UnixNano())
 
-		actual, loaded := h.udpSessions.LoadOrStore(src, session)
+		actual, loaded := h.udpSessions.LoadOrStore(key, session)
 		if loaded {
-			// Another goroutine beat us to it, close the one we just made
 			tunnelConn.Close()
 			session = actual.(*udpSession)
 		} else {
-			log.V("[TUN UDP] New session binding: %s -> %s", src, dst)
+			log.V("[TUN UDP] New session: %s -> %s", src, dst)
 
-			// We only `ConnectUDP` once per pseudo-socket to trick Trojan
-			// into maintaining a pseudo-socket. The destination passed here
-			// is completely arbitrary since UDP mapping sends the actual target
-			// inside every WebSocket/transport packet frame anyway.
-			// We just arbitrarily use the First Packet's target.
 			if err := tunnelConn.ConnectUDP(endpoint, nil); err != nil {
 				log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
 				tunnelConn.Close()
-				h.udpSessions.Delete(src)
+				h.udpSessions.Delete(key)
 				return
 			}
 
-			go h.udpReadLoop(src, session)
+			go h.udpReadLoop(key, session)
 		}
 	} else {
 		session = val.(*udpSession)
@@ -240,8 +244,9 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 }
 
 // udpReadLoop continuously reads UDP responses from the proxy tunnel and writes them back to the TUN Stack.
-func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) {
-	defer h.udpSessions.Delete(tunClientSrc)
+func (h *Handler) udpReadLoop(key udpSessionKey, session *udpSession) {
+	tunClientSrc := key.src
+	defer h.udpSessions.Delete(key)
 	defer session.tunnelConn.Close()
 
 	// Eagerly release the cached write-side conn when the session ends.
@@ -348,12 +353,13 @@ func (h *Handler) cleanupUDPSessions() {
 			return
 		case <-ticker.C:
 			cutoff := time.Now().Add(-2 * time.Minute).UnixNano()
-			h.udpSessions.Range(func(key, value interface{}) bool {
+			h.udpSessions.Range(func(k, value interface{}) bool {
 				session := value.(*udpSession)
 				if session.lastActive.Load() < cutoff {
-					log.V("[TUN UDP] Cleaning up inactive NAT session: %s", key)
+					sk := k.(udpSessionKey)
+					log.V("[TUN UDP] Cleanup inactive session: %s -> %s", sk.src, sk.dst)
 					session.tunnelConn.Close()
-					h.udpSessions.Delete(key)
+					h.udpSessions.Delete(k)
 				}
 				return true
 			})

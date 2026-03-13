@@ -19,6 +19,7 @@ import (
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
 	"ewp-core/transport/h3grpc"
+	masquetransport "ewp-core/transport/masque"
 	"ewp-core/transport/websocket"
 	"ewp-core/transport/xhttp"
 	"ewp-core/tun"
@@ -84,10 +85,11 @@ type VPNConfig struct {
 	Password   string
 
 	// 协议配置
-	Protocol    string // "ws" / "grpc" / "xhttp" / "h3grpc"
-	AppProtocol string // "ewp" / "trojan"
-	Path        string // WebSocket 路径 或 gRPC 服务名
-	XhttpMode   string // "auto" / "stream-one" / "stream-down"（仅 xhttp）
+	Protocol        string // "ws" / "grpc" / "xhttp" / "h3grpc" / "masque"
+	AppProtocol     string // "ewp" / "trojan"
+	Path            string // WebSocket 路径 或 gRPC 服务名
+	XhttpMode       string // "auto" / "stream-one" / "stream-down"（仅 xhttp）
+	UDPTemplatePath string // MASQUE UDP 模板路径，e.g. "/masque/{target_host}/{target_port}"
 
 	// Host/SNI 配置（CDN 场景）
 	Host string // HTTP Host 头覆盖（留空则同 ServerAddr）
@@ -272,6 +274,29 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 			}
 		}
 		vm.transport = h3T
+	case "masque":
+		tmplPath := config.UDPTemplatePath
+		if tmplPath == "" {
+			tmplPath = config.Path
+		}
+		if tmplPath == "" {
+			tmplPath = "/masque/{target_host}/{target_port}"
+		}
+		udpTemplateURL := "https://" + config.ServerAddr + tmplPath
+		var mT *masquetransport.Transport
+		mT, err = masquetransport.New(
+			config.ServerAddr,
+			config.Token,
+			udpTemplateURL,
+			config.EnableECH,
+			config.EnableMozillaCA,
+			config.EnablePQC,
+			echMgr,
+		)
+		if err == nil && config.Host != "" {
+			mT.SetAuthority(config.Host)
+		}
+		vm.transport = mT
 	default:
 		cancel()
 		return fmt.Errorf("unsupported protocol: %s", config.Protocol)
@@ -296,6 +321,8 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		case *xhttp.Transport:
 			t.SetSNI(effectiveSNI)
 		case *h3grpc.Transport:
+			t.SetSNI(effectiveSNI)
+		case *masquetransport.Transport:
 			t.SetSNI(effectiveSNI)
 		}
 	}

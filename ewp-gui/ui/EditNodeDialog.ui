@@ -147,7 +147,7 @@
           <item><property name="text"><string>gRPC (HTTP/2)</string></property></item>
           <item><property name="text"><string>XHTTP</string></property></item>
           <item><property name="text"><string>H3gRPC (HTTP/3)</string></property></item>
-          <item><property name="text"><string>WebTransport (QUIC)</string></property></item>
+          <item><property name="text"><string>MASQUE (QUIC Datagrams)</string></property></item>
          </widget>
         </item>
 
@@ -260,20 +260,20 @@
        </widget>
       </item>
 
-      <!-- WebTransport 子配置 -->
+      <!-- MASQUE 子配置 -->
       <item>
-       <widget class="QGroupBox" name="wtGroup">
-        <property name="title"><string>WebTransport</string></property>
+       <widget class="QGroupBox" name="masqueGroup">
+        <property name="title"><string>MASQUE (CONNECT-UDP)</string></property>
         <layout class="QFormLayout">
          <item row="0" column="0">
-          <widget class="QLabel" name="labelWtPath">
-           <property name="text"><string>路径 (Path)</string></property>
+          <widget class="QLabel" name="labelMasquePath">
+           <property name="text"><string>UDP 模板路径</string></property>
           </widget>
          </item>
          <item row="0" column="1">
-          <widget class="QLineEdit" name="editWtPath">
-           <property name="text"><string>/wt</string></property>
-           <property name="placeholderText"><string>/wt</string></property>
+          <widget class="QLineEdit" name="editMasquePath">
+           <property name="text"><string>/masque/{target_host}/{target_port}</string></property>
+           <property name="placeholderText"><string>/masque/{target_host}/{target_port}</string></property>
           </widget>
          </item>
         </layout>

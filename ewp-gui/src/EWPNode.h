@@ -27,8 +27,8 @@ struct EWPNode {
     // Trojan 认证
     QString trojanPassword;
 
-    // 传输协议: 0=WebSocket, 1=gRPC, 2=XHTTP, 3=H3gRPC, 4=WebTransport
-    enum TransportMode { WS = 0, GRPC = 1, XHTTP = 2, H3GRPC = 3, WEBTRANSPORT = 4 };
+    // 传输协议: 0=WebSocket, 1=gRPC, 2=XHTTP, 3=H3gRPC, 4=MASQUE
+    enum TransportMode { WS = 0, GRPC = 1, XHTTP = 2, H3GRPC = 3, MASQUE = 4 };
     TransportMode transportMode = WS;
 
     // WebSocket 配置
@@ -43,8 +43,8 @@ struct EWPNode {
     QString xhttpMode = "auto";
     QString xhttpPath = "/xhttp";
 
-    // WebTransport 配置
-    QString wtPath = "/wt";
+    // MASQUE (CONNECT-UDP / RFC 9298) 配置
+    QString masquePath = "/masque/{target_host}/{target_port}";
 
     // TLS 配置
     bool enableTLS = true;
@@ -84,7 +84,7 @@ struct EWPNode {
         obj["contentType"] = contentType;
         obj["xhttpMode"] = xhttpMode;
         obj["xhttpPath"] = xhttpPath;
-        obj["wtPath"] = wtPath;
+        obj["masquePath"] = masquePath;
         obj["enableTLS"] = enableTLS;
         obj["sni"] = sni;
         obj["minTLSVersion"] = minTLSVersion;
@@ -112,7 +112,7 @@ struct EWPNode {
         node.contentType = obj["contentType"].toString();
         node.xhttpMode = obj["xhttpMode"].toString("auto");
         node.xhttpPath = obj["xhttpPath"].toString("/xhttp");
-        node.wtPath = obj["wtPath"].toString("/wt");
+        node.masquePath = obj["masquePath"].toString("/masque/{target_host}/{target_port}");
         node.enableTLS = obj["enableTLS"].toBool(true);
         node.sni = obj["sni"].toString();
         node.minTLSVersion = obj["minTLSVersion"].toString("1.2");
@@ -151,7 +151,7 @@ struct EWPNode {
             case GRPC:         return prefix + "-gRPC";
             case XHTTP:        return prefix + "-XHTTP";
             case H3GRPC:       return prefix + "-H3";
-            case WEBTRANSPORT: return prefix + "-WT";
+            case MASQUE:       return prefix + "-MASQUE";
             default:           return prefix;
         }
     }

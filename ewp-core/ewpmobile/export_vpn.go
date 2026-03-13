@@ -173,6 +173,12 @@ func (b *VPNConfigBuilder) SetContentType(ct string) *VPNConfigBuilder {
 	return b
 }
 
+// SetUDPTemplatePath 设置 MASQUE UDP 模板路径，例如 "/masque/{target_host}/{target_port}"
+func (b *VPNConfigBuilder) SetUDPTemplatePath(path string) *VPNConfigBuilder {
+	b.config.UDPTemplatePath = path
+	return b
+}
+
 // Build 构建配置
 func (b *VPNConfigBuilder) Build() *VPNConfig {
 	return b.config

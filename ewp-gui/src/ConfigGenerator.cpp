@@ -169,9 +169,10 @@ QJsonObject ConfigGenerator::generateTransport(const EWPNode &node)
             }
             break;
 
-        case EWPNode::WEBTRANSPORT:
-            transport["type"] = "webtransport";
-            transport["path"] = node.wtPath.isEmpty() ? "/wt" : node.wtPath;
+        case EWPNode::MASQUE:
+            transport["type"] = "masque";
+            transport["udp_template_path"] = node.masquePath.isEmpty()
+                ? "/masque/{target_host}/{target_port}" : node.masquePath;
             break;
     }
     
@@ -195,7 +196,7 @@ QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
     }
 
     QJsonArray alpn;
-    if (node.transportMode == EWPNode::H3GRPC || node.transportMode == EWPNode::WEBTRANSPORT) {
+    if (node.transportMode == EWPNode::H3GRPC || node.transportMode == EWPNode::MASQUE) {
         alpn.append("h3");
     } else if (node.transportMode == EWPNode::GRPC) {
         alpn.append("h2");

@@ -160,7 +160,7 @@ class EWPVpnService : VpnService(), SocketProtector {
             EWPNode.TransportMode.GRPC -> "grpc"
             EWPNode.TransportMode.XHTTP -> "xhttp"
             EWPNode.TransportMode.H3GRPC -> "h3grpc"
-            EWPNode.TransportMode.WEBTRANSPORT -> "webtransport"
+            EWPNode.TransportMode.MASQUE -> "masque"
         }
         
         val path = when (node.transportMode) {
@@ -168,7 +168,7 @@ class EWPVpnService : VpnService(), SocketProtector {
             EWPNode.TransportMode.GRPC -> node.grpcServiceName
             EWPNode.TransportMode.XHTTP -> node.xhttpPath
             EWPNode.TransportMode.H3GRPC -> node.grpcServiceName
-            EWPNode.TransportMode.WEBTRANSPORT -> node.wtPath
+            EWPNode.TransportMode.MASQUE -> node.masquePath
         }
         
         val serverAddr = "${node.serverAddress}:${node.serverPort}"
@@ -209,6 +209,9 @@ class EWPVpnService : VpnService(), SocketProtector {
             }
             if (node.transportMode == EWPNode.TransportMode.H3GRPC && node.contentType.isNotEmpty()) {
                 setContentType(node.contentType)
+            }
+            if (node.transportMode == EWPNode.TransportMode.MASQUE && node.masquePath.isNotEmpty()) {
+                setUDPTemplatePath(node.masquePath)
             }
             
             setEnableFlow(node.enableFlow)

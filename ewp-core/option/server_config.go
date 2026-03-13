@@ -19,13 +19,18 @@ type ServerConfig struct {
 type ListenerConfig struct {
 	Port    int      `json:"port"`              // Listen port
 	Address string   `json:"address,omitempty"` // Listen address (default: 0.0.0.0)
-	Modes   []string `json:"modes"`             // ws, grpc, xhttp, h3, webtransport (can enable multiple)
+	Modes   []string `json:"modes"`             // ws, grpc, xhttp, h3, masque (can enable multiple)
 
 	// Mode-specific paths
 	WSPath      string `json:"ws_path,omitempty"`      // WebSocket path
 	XHTTPPath   string `json:"xhttp_path,omitempty"`   // XHTTP path
 	GRPCService string `json:"grpc_service,omitempty"` // gRPC service name
-	WTPath      string `json:"wt_path,omitempty"`      // WebTransport endpoint path
+
+	// MASQUE (CONNECT-UDP / RFC 9298)
+	// MasquePath is the URI template path for the CONNECT-UDP proxy endpoint.
+	// Default: "/masque/{target_host}/{target_port}"
+	// The Handler is also registered at "/" to accept plain HTTP CONNECT (TCP tunnels).
+	MasquePath string `json:"masque_path,omitempty"`
 }
 
 // ProtocolConfig defines protocol settings
@@ -87,7 +92,7 @@ func DefaultServerConfig() *ServerConfig {
 			WSPath:      "/",
 			XHTTPPath:   "/xhttp",
 			GRPCService: "ProxyService",
-			WTPath:      "/wt",
+			MasquePath:  "/masque/{target_host}/{target_port}",
 		},
 		Protocol: ProtocolConfig{
 			Type:       "ewp",
@@ -135,7 +140,7 @@ func (c *ServerConfig) Validate() error {
 		return fmt.Errorf("at least one mode must be enabled")
 	}
 
-	validModes := map[string]bool{"ws": true, "grpc": true, "xhttp": true, "h3": true, "webtransport": true}
+	validModes := map[string]bool{"ws": true, "grpc": true, "xhttp": true, "h3": true, "masque": true}
 	for _, mode := range c.Listener.Modes {
 		if !validModes[mode] {
 			return fmt.Errorf("invalid mode: %s", mode)
@@ -170,9 +175,9 @@ func (c *ServerConfig) Validate() error {
 		}
 	}
 
-	// Validate HTTP/3 and WebTransport requirements
+	// Validate HTTP/3 and MASQUE requirements
 	for _, mode := range c.Listener.Modes {
-		if mode == "h3" || mode == "webtransport" {
+		if mode == "h3" || mode == "masque" {
 			if c.TLS == nil || !c.TLS.Enabled {
 				return fmt.Errorf("%s mode requires TLS to be enabled", mode)
 			}
@@ -186,6 +191,10 @@ func (c *ServerConfig) Validate() error {
 			}
 			if !hasH3 {
 				return fmt.Errorf("%s mode requires 'h3' in TLS ALPN", mode)
+			}
+
+			if mode == "masque" && c.Listener.MasquePath == "" {
+				c.Listener.MasquePath = "/masque/{target_host}/{target_port}"
 			}
 		}
 	}
@@ -275,8 +284,8 @@ func LoadFromEnv() *ServerConfig {
 		cfg.Listener.GRPCService = grpcService
 	}
 
-	if wtPath := os.Getenv("WT_PATH"); wtPath != "" {
-		cfg.Listener.WTPath = wtPath
+	if masquePath := os.Getenv("MASQUE_PATH"); masquePath != "" {
+		cfg.Listener.MasquePath = masquePath
 	}
 
 	return cfg

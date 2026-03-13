@@ -1,0 +1,22 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "listener": {
+    "port": 443,
+    "address": "0.0.0.0",
+    "modes": ["masque"],
+    "masque_path": "/masque/{target_host}/{target_port}"
+  },
+  "protocol": {
+    "type": "ewp",
+    "uuid": "d342d11e-d424-4583-b36e-524ab1f0afa4"
+  },
+  "tls": {
+    "enabled": true,
+    "cert_file": "/path/to/cert.pem",
+    "key_file": "/path/to/key.pem",
+    "alpn": ["h3"]
+  }
+}

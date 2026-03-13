@@ -93,7 +93,7 @@ type OutboundConfig struct {
 
 // TransportConfig defines transport layer settings
 type TransportConfig struct {
-	Type string `json:"type"` // ws, grpc, h3grpc, xhttp
+	Type string `json:"type"` // ws, grpc, h3grpc, xhttp, masque
 
 	// WebSocket
 	Path                string            `json:"path,omitempty"`
@@ -119,6 +119,12 @@ type TransportConfig struct {
 
 	// XHTTP
 	Mode string `json:"mode,omitempty"` // auto, stream-one, stream-down
+
+	// MASQUE (CONNECT-UDP / RFC 9298)
+	// UDPTemplatePath is the URI template path for the CONNECT-UDP proxy endpoint.
+	// The full template is built as https://<server>:<port><UDPTemplatePath>.
+	// Default: "/masque/{target_host}/{target_port}"
+	UDPTemplatePath string `json:"udp_template_path,omitempty"`
 }
 
 // GRPCWebConfig defines gRPC-Web specific settings
@@ -421,7 +427,7 @@ func (o *OutboundConfig) Validate() error {
 
 // Validate validates transport configuration
 func (t *TransportConfig) Validate() error {
-	validTypes := map[string]bool{"ws": true, "grpc": true, "h3grpc": true, "xhttp": true, "webtransport": true}
+	validTypes := map[string]bool{"ws": true, "grpc": true, "h3grpc": true, "xhttp": true, "masque": true}
 	if !validTypes[t.Type] {
 		return fmt.Errorf("invalid type: %s", t.Type)
 	}
@@ -456,9 +462,9 @@ func (t *TransportConfig) Validate() error {
 			return fmt.Errorf("invalid xhttp mode: %s", t.Mode)
 		}
 
-	case "webtransport":
-		if t.Path == "" {
-			t.Path = "/wt"
+	case "masque":
+		if t.UDPTemplatePath == "" {
+			t.UDPTemplatePath = "/masque/{target_host}/{target_port}"
 		}
 	}
 
