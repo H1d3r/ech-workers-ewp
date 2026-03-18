@@ -122,6 +122,28 @@
         <property name="checked"><bool>true</bool></property>
        </widget>
       </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelDNSMode">
+        <property name="text"><string>DNS 模式</string></property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <layout class="QVBoxLayout">
+        <item>
+         <widget class="QComboBox" name="comboDNSMode">
+          <item><property name="text"><string>FakeIP（推荐，&lt;1ms 极速 DNS）</string></property></item>
+          <item><property name="text"><string>Normal（DNS 查询透传隧道）</string></property></item>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelDNSModeHint">
+          <property name="text"><string>FakeIP: DNS 被本地拦截并返回虚假 IP，延迟极低。Normal: DNS 查询透传远端。</string></property>
+          <property name="styleSheet"><string>color: gray; font-size: 10px;</string></property>
+          <property name="wordWrap"><bool>true</bool></property>
+         </widget>
+        </item>
+       </layout>
+      </item>
      </layout>
     </widget>
    </item>

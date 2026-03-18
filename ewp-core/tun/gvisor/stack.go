@@ -38,9 +38,11 @@ type cachedUDPConn struct {
 }
 
 type StackConfig struct {
-	MTU        int
-	TCPHandler func(conn *gonet.TCPConn)
-	UDPHandler func(payload []byte, src netip.AddrPort, dst netip.AddrPort)
+	MTU                int
+	MaxTCPConns        int           // max concurrent TCP connections for the forwarder; 0 = default 10000
+	UDPConnIdleTimeout time.Duration // idle timeout for cached UDP write conns; 0 = default 2m30s
+	TCPHandler         func(conn *gonet.TCPConn)
+	UDPHandler         func(payload []byte, src netip.AddrPort, dst netip.AddrPort)
 }
 
 type Stack struct {
@@ -160,7 +162,11 @@ func tuneTCPStack(ipStack *stack.Stack) {
 }
 
 func (s *Stack) setupTCPForwarder() {
-	tcpForwarder := tcp.NewForwarder(s.ipStack, 0, 10000, func(r *tcp.ForwarderRequest) {
+	maxConns := s.config.MaxTCPConns
+	if maxConns <= 0 {
+		maxConns = 10000
+	}
+	tcpForwarder := tcp.NewForwarder(s.ipStack, 0, maxConns, func(r *tcp.ForwarderRequest) {
 		var wq waiter.Queue
 		// Read the transport ID BEFORE Complete() — gVisor releases the
 		// internal segment after Complete(), making r.ID() panic.
@@ -329,9 +335,18 @@ func (s *Stack) InjectUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort
 		pkt[23] = byte(dst.Port())
 		pkt[24] = byte(udpLen >> 8)
 		pkt[25] = byte(udpLen)
-		// pkt[26:28] = 0 (UDP checksum optional for IPv4)
+		// pkt[26:28] = 0 temporarily; filled after payload copy
 
 		copy(pkt[28:], payload)
+
+		// UDP checksum over pseudo-header + UDP segment.
+		// RFC 768 makes this optional for IPv4, but some NATs / firewalls
+		// drop zero-checksum UDP packets, so we compute it for safety.
+		udpCsum := udpChecksum(pkt[20:20+udpLen], srcB[:], dstB[:])
+		pkt[26] = byte(udpCsum >> 8)
+		pkt[27] = byte(udpCsum)
+
+		// payload already copied above
 
 		_, err := s.tunDev.Write([][]byte{pkt}, 0)
 		return err
@@ -339,6 +354,41 @@ func (s *Stack) InjectUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort
 
 	// For IPv6, fall back to WriteUDP (shouldn't hit port conflict for AAAA)
 	return s.WriteUDP(payload, src, dst)
+}
+
+// udpChecksum computes the UDP checksum over a pseudo-header and UDP segment.
+// udpData must be the complete UDP segment (header + payload).
+// srcIP and dstIP must each be exactly 4 bytes (IPv4).
+// Per RFC 768: if the computed checksum is zero, transmit 0xFFFF instead.
+func udpChecksum(udpData, srcIP, dstIP []byte) uint16 {
+	var csum uint32
+
+	// IPv4 pseudo-header: srcIP(4) + dstIP(4) + zero(1) + proto(1) + udpLen(2)
+	csum += uint32(srcIP[0])<<8 | uint32(srcIP[1])
+	csum += uint32(srcIP[2])<<8 | uint32(srcIP[3])
+	csum += uint32(dstIP[0])<<8 | uint32(dstIP[1])
+	csum += uint32(dstIP[2])<<8 | uint32(dstIP[3])
+	csum += 17 // protocol = UDP
+	csum += uint32(len(udpData))
+
+	// UDP segment (header + payload)
+	for i := 0; i+1 < len(udpData); i += 2 {
+		csum += uint32(udpData[i])<<8 | uint32(udpData[i+1])
+	}
+	if len(udpData)%2 == 1 {
+		csum += uint32(udpData[len(udpData)-1]) << 8
+	}
+
+	// Fold 32-bit sum to 16-bit
+	for csum > 0xffff {
+		csum = (csum & 0xffff) + (csum >> 16)
+	}
+
+	result := ^uint16(csum)
+	if result == 0 {
+		result = 0xffff // RFC 768: transmit 0xFFFF, never 0x0000
+	}
+	return result
 }
 
 func (s *Stack) dialUDP(src, dst netip.AddrPort) (*gonet.UDPConn, error) {
@@ -367,7 +417,12 @@ func (s *Stack) connCacheCleanup() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	const idleTimeout = 5 * time.Minute
+	idleTimeout := s.config.UDPConnIdleTimeout
+	if idleTimeout <= 0 {
+		// Default: slightly longer than handler's session timeout (2min)
+		// so ReleaseConn can clean up eagerly, but stale conns don't linger.
+		idleTimeout = 2*time.Minute + 30*time.Second
+	}
 
 	for {
 		select {

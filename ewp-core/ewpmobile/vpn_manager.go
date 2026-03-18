@@ -16,6 +16,7 @@ import (
 	"ewp-core/common/tls"
 	"ewp-core/dns"
 	"ewp-core/log"
+	"ewp-core/nat"
 	"ewp-core/transport"
 	"ewp-core/transport/grpc"
 	"ewp-core/transport/h3grpc"
@@ -66,6 +67,7 @@ type vpnManager struct {
 	tunDevice  *androidTunDevice
 	tunStack   *ewpgvisor.Stack
 	tunHandler *tun.Handler
+	peerReg    *nat.ShardedRegistry // Full Cone NAT registry; always non-nil after Start()
 
 	// 配置
 	config *VPNConfig
@@ -117,6 +119,9 @@ type VPNConfig struct {
 	TunMask    string
 	TunDNS     string
 	TunMTU     int
+
+	// DisableFakeIP = true → Normal Mode: skip DNS FakeIP pool, use PeerRegistry only.
+	DisableFakeIP bool
 }
 
 // newVPNManager 创建 VPN 管理器
@@ -335,17 +340,35 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		log.Printf("[VPNManager] Warning: No socket protector - transport may loop through TUN")
 	}
 
-	// 4. 初始化 TUN 处理器与 DNS 接管
+	// 4. 初始化 TUN 处理器、ShardedRegistry 与条件式 FakeIP 池
 	log.Printf("[VPNManager] Creating TUN handler...")
 
-	// We prepare the udp writer interface ahead of time, pointing to the stack pointer later.
 	udpWriter := &gvisorUDPWriter{stack: nil}
 	vm.tunHandler = tun.NewHandler(ctx, vm.transport, udpWriter)
 
-	// Initialize FakeIP pool for instant DNS responses
-	fakeIPPool := dns.NewFakeIPPool()
-	vm.tunHandler.SetFakeIPPool(fakeIPPool)
-	log.Printf("[VPNManager] FakeIP DNS enabled")
+	reg := nat.NewShardedRegistry()
+	vm.tunHandler.SetPeerRegistry(reg)
+	vm.peerReg = reg
+
+	if !config.DisableFakeIP {
+		vm.tunHandler.SetFakeIPPool(dns.NewFakeIPPool())
+		log.Printf("[VPNManager] FakeIP DNS enabled")
+	} else {
+		log.Printf("[VPNManager] Normal Mode: FakeIP disabled, peer vIPs via ShardedRegistry")
+	}
+
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reg.EvictStale(time.Now().Add(-5 * time.Minute).UnixNano())
+			}
+		}
+	}()
 
 	// 6. 创建 TUN 设备 (Android FileDescriptor)
 	log.Printf("[VPNManager] Creating TUN device from FD=%d, MTU=%d", tunFD, vm.tunMTU)

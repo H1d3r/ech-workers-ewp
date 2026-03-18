@@ -58,6 +58,7 @@ fun NodeEditScreen(
     var enablePQC by remember { mutableStateOf(existingNode?.enablePQC ?: false) }
     var enableFlow by remember { mutableStateOf(existingNode?.enableFlow ?: true) }
     var enableMozillaCA by remember { mutableStateOf(existingNode?.enableMozillaCA ?: true) }
+    var disableFakeIP by remember { mutableStateOf(existingNode?.disableFakeIP ?: false) }
 
     val isValid = name.isNotBlank() && serverAddress.isNotBlank() &&
             (appProtocol == EWPNode.AppProtocol.TROJAN && password.isNotBlank() ||
@@ -100,7 +101,8 @@ fun NodeEditScreen(
                                 dnsServer = dnsServer,
                                 enableFlow = enableFlow,
                                 enablePQC = enablePQC,
-                                enableMozillaCA = enableMozillaCA
+                                enableMozillaCA = enableMozillaCA,
+                                disableFakeIP = disableFakeIP
                             )
                             if (existingNode == null) viewModel.addNode(node)
                             else viewModel.updateNode(node)
@@ -409,6 +411,14 @@ fun NodeEditScreen(
                             singleLine = true
                         )
                     }
+
+                    Spacer(Modifier.height(4.dp))
+
+                    SwitchRow(
+                        label = "Normal 模式（禁用 FakeIP）",
+                        subtitle = "DNS 查询透传隧道；适用于 Full Cone NAT P2P 场景",
+                        checked = disableFakeIP
+                    ) { disableFakeIP = it }
                 }
             }
 

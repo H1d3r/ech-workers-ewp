@@ -36,7 +36,8 @@ data class EWPNode(
     val enableFlow: Boolean = true,
     val enablePQC: Boolean = false,
     val enableMozillaCA: Boolean = true,
-    
+    val disableFakeIP: Boolean = false,
+
     val latency: Int = 0
 ) {
     @Serializable

@@ -1,6 +1,8 @@
 package gvisor
 
 import (
+	"sync"
+
 	tun "golang.zx2c4.com/wireguard/tun"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -12,14 +14,19 @@ type endpoint struct {
 	tunDev     tun.Device
 	mtu        uint32
 	dispatcher stack.NetworkDispatcher
+	bufPool    sync.Pool // []byte buffers of size mtu+4; reduces GC pressure in dispatchLoop
 }
 
 // newEndpoint wraps a wireguard-go tun.Device as a gvisor LinkEndpoint.
 func newEndpoint(dev tun.Device, mtu uint32) (stack.LinkEndpoint, error) {
-	return &endpoint{
+	ep := &endpoint{
 		tunDev: dev,
 		mtu:    mtu,
-	}, nil
+	}
+	ep.bufPool.New = func() any {
+		return make([]byte, mtu+4)
+	}
+	return ep, nil
 }
 
 func (e *endpoint) MTU() uint32 {
@@ -75,7 +82,7 @@ func (e *endpoint) dispatchLoop() {
 	// Pre-allocate buffer slices for the full batch.
 	bufs := make([][]byte, batchSize)
 	for i := range bufs {
-		bufs[i] = make([]byte, e.mtu+4) // +4 for any platform headroom
+		bufs[i] = e.bufPool.Get().([]byte) // +4 headroom baked into pool alloc size
 	}
 	sizes := make([]int, batchSize)
 
@@ -111,8 +118,10 @@ func (e *endpoint) dispatchLoop() {
 			pkt.DecRef()
 
 			// Refresh the buffer for reuse — the previous slice was
-			// handed to gVisor which may hold a reference via MakeWithData.
-			bufs[i] = make([]byte, e.mtu+4)
+			// handed to gVisor via MakeWithData (which copies), but we
+			// must not reuse it since gVisor may still reference it.
+			// Pool.Get() is faster than make() on hot paths (P-local cache).
+			bufs[i] = e.bufPool.Get().([]byte)
 		}
 	}
 }

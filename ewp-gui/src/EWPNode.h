@@ -63,6 +63,11 @@ struct EWPNode {
     bool enableFlow = true;
     bool useMozillaCA = true;
 
+    // DNS 模式
+    // false（默认）= FakeIP 模式：DNS 被拦截并返回虚假 IP，延迟极低。
+    // true  = Normal 模式：DNS 查询透传隧道；Full Cone NAT 仅依赖 PeerRegistry vIP。
+    bool disableFakeIP = false;
+
     // 测试结果
     int latency = 0;  // ms, -1=失败, 0=未测试
 
@@ -94,6 +99,7 @@ struct EWPNode {
         obj["enablePQC"] = enablePQC;
         obj["enableFlow"] = enableFlow;
         obj["useMozillaCA"] = useMozillaCA;
+        obj["disableFakeIP"] = disableFakeIP;
         return obj;
     }
 
@@ -122,6 +128,7 @@ struct EWPNode {
         node.enablePQC = obj["enablePQC"].toBool(false);
         node.enableFlow = obj["enableFlow"].toBool(true);
         node.useMozillaCA = obj["useMozillaCA"].toBool(true);
+        node.disableFakeIP = obj["disableFakeIP"].toBool(false);
 
         // 新版 JSON 键：server / host
         // 兼容旧版 nodes.json：旧版 serverIP=连接目标, serverAddress=Host

@@ -65,9 +65,10 @@ type InboundConfig struct {
 	AutoRoute     bool     `json:"auto_route,omitempty"`
 	StrictRoute   bool     `json:"strict_route,omitempty"`
 	Stack         string   `json:"stack,omitempty"`      // gvisor, system
-	DNS             string `json:"dns,omitempty"`              // IPv4 DNS server address advertised to the TUN interface
-	IPv6DNS         string `json:"ipv6_dns,omitempty"`         // IPv6 DNS server address advertised to the TUN interface
+	DNS             string `json:"dns,omitempty"`               // IPv4 DNS server address advertised to the TUN interface
+	IPv6DNS         string `json:"ipv6_dns,omitempty"`          // IPv6 DNS server address advertised to the TUN interface
 	TunnelDoHServer string `json:"tunnel_doh_server,omitempty"` // DoH server URL used for DNS-over-tunnel (default: https://dns.google/dns-query)
+	DisableFakeIP   bool   `json:"disable_fakeip,omitempty"`    // true = Normal Mode: skip FakeIP DNS pool, use PeerRegistry vIPs only
 }
 
 // OutboundConfig defines an outbound connection handler

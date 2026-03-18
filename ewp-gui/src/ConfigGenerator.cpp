@@ -11,7 +11,7 @@ QJsonObject ConfigGenerator::generateClientConfig(const EWPNode &node, const Set
     config["log"] = generateLog();
     
     QJsonArray inbounds;
-    inbounds.append(generateInbound(settings, tunMode));
+    inbounds.append(generateInbound(node, settings, tunMode));
     config["inbounds"] = inbounds;
     
     QJsonArray outbounds;
@@ -53,7 +53,7 @@ QJsonObject ConfigGenerator::generateLog()
     return log;
 }
 
-QJsonObject ConfigGenerator::generateInbound(const SettingsDialog::AppSettings &settings, bool tunMode)
+QJsonObject ConfigGenerator::generateInbound(const EWPNode &node, const SettingsDialog::AppSettings &settings, bool tunMode)
 {
     QJsonObject inbound;
     
@@ -74,6 +74,9 @@ QJsonObject ConfigGenerator::generateInbound(const SettingsDialog::AppSettings &
         }
         if (!settings.tunnelDoHServer.isEmpty()) {
             inbound["tunnel_doh_server"] = settings.tunnelDoHServer.trimmed();
+        }
+        if (node.disableFakeIP) {
+            inbound["disable_fakeip"] = true;
         }
     } else {
         inbound["type"] = "mixed";

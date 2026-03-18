@@ -320,6 +320,7 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, cfg *
 		Transport:       trans,
 		ServerAddr:      cfg.Outbounds[0].Server,
 		TunnelDoHServer: inbound.TunnelDoHServer,
+		DisableFakeIP:   inbound.DisableFakeIP,
 	}
 
 	tunDev, err := tun.New(tunCfg)

@@ -179,6 +179,14 @@ func (b *VPNConfigBuilder) SetUDPTemplatePath(path string) *VPNConfigBuilder {
 	return b
 }
 
+// SetDisableFakeIP 设置是否禁用 FakeIP DNS 模式。
+// false（默认）= FakeIP 模式：DNS 被拦截并返回虚假 IP，延迟极低。
+// true  = Normal 模式：DNS 查询透传隧道；Full Cone NAT 仅依赖 PeerRegistry vIP。
+func (b *VPNConfigBuilder) SetDisableFakeIP(v bool) *VPNConfigBuilder {
+	b.config.DisableFakeIP = v
+	return b
+}
+
 // Build 构建配置
 func (b *VPNConfigBuilder) Build() *VPNConfig {
 	return b.config

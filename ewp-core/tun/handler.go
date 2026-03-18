@@ -12,6 +12,7 @@ import (
 	commpool "ewp-core/common/bufferpool"
 	"ewp-core/dns"
 	"ewp-core/log"
+	"ewp-core/nat"
 	"ewp-core/transport"
 
 	"golang.org/x/sync/singleflight"
@@ -65,10 +66,12 @@ type Handler struct {
 	transport  transport.Transport
 	ctx        context.Context
 	fakeIPPool *dns.FakeIPPool
+	peerReg    nat.PeerRegistry // Full Cone NAT peer vIP registry (decoupled from DNS FakeIP)
 
-	udpWriter   UDPWriter
-	udpSessions sync.Map           // map[udpSessionKey]*udpSession
-	udpSF       singleflight.Group // deduplicates concurrent ConnectUDP for same 5-tuple
+	udpWriter          UDPWriter
+	udpSessions        sync.Map           // map[udpSessionKey]*udpSession
+	udpSF              singleflight.Group // deduplicates concurrent ConnectUDP for same 5-tuple
+	udpSessionTimeout  time.Duration      // idle timeout for UDP sessions; 0 = default 2min
 }
 
 func NewHandler(ctx context.Context, trans transport.Transport, udpWriter UDPWriter) *Handler {
@@ -87,6 +90,19 @@ func NewHandler(ctx context.Context, trans transport.Transport, udpWriter UDPWri
 // SetFakeIPPool sets the FakeIP pool for instant DNS responses.
 func (h *Handler) SetFakeIPPool(pool *dns.FakeIPPool) {
 	h.fakeIPPool = pool
+}
+
+// SetPeerRegistry attaches a PeerRegistry for Full Cone NAT peer vIP management.
+// When set, inbound P2P peers are anchored to stable vIPs independently of DNS FakeIP.
+// stub: routing logic wired in Green phase.
+func (h *Handler) SetPeerRegistry(reg nat.PeerRegistry) {
+	h.peerReg = reg
+}
+
+// SetUDPSessionTimeout overrides the default UDP session idle timeout (2 min).
+// Sessions inactive for longer than this are cleaned up.
+func (h *Handler) SetUDPSessionTimeout(d time.Duration) {
+	h.udpSessionTimeout = d
 }
 
 func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
@@ -189,16 +205,28 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		return
 	}
 
-	// Reverse-lookup fake IP to domain or peer IP for UDP endpoint.
-	// Logs are emitted only on new session creation (inside the singleflight below)
-	// to keep the per-packet hot path allocation-free.
+	// Resolve the outbound endpoint from the packet destination.
+	//
+	// Priority order (stops at first match):
+	//  1. DNS FakeIP → domain name  (FakeIP mode, fakeIPPool)
+	//  2. Peer vIP   → real AddrPort (PeerRegistry, Normal Mode + FakeIP Mode)
+	//  3. Legacy peer FakeIP → real IP (fakeIPPool only, no peerReg)
+	//  4. Direct real IP     → CDN / regular traffic bypass
 	var endpoint transport.Endpoint
+	unmapped := dst.Addr().Unmap()
+
 	if h.fakeIPPool != nil {
-		unmapped := dst.Addr().Unmap()
 		if domain, ok := h.fakeIPPool.LookupByIP(unmapped); ok {
 			endpoint = transport.Endpoint{Domain: domain, Port: dst.Port()}
-		} else if realIP, ok := h.fakeIPPool.LookupPeerByFakeIP(unmapped); ok {
-			endpoint = transport.Endpoint{Addr: netip.AddrPortFrom(realIP, dst.Port())}
+		} else if h.peerReg == nil {
+			if realIP, ok := h.fakeIPPool.LookupPeerByFakeIP(unmapped); ok {
+				endpoint = transport.Endpoint{Addr: netip.AddrPortFrom(realIP, dst.Port())}
+			}
+		}
+	}
+	if endpoint.Domain == "" && !endpoint.Addr.IsValid() && h.peerReg != nil {
+		if realFull, ok := h.peerReg.LookupReal(unmapped); ok {
+			endpoint = transport.Endpoint{Addr: netip.AddrPortFrom(realFull.Addr(), dst.Port())}
 		}
 	}
 	if endpoint.Domain == "" && !endpoint.Addr.IsValid() {
@@ -305,44 +333,61 @@ func (h *Handler) udpReadLoop(key udpSessionKey, session *udpSession) {
 		// Determine the src address to inject into gVisor.
 		//
 		// Cases:
-		//  1. Server returned no address → fall back to original session dst (FakeIP).
-		//  2. Server returned a FakeIP → use as-is.
-		//  3. Server returned a real IP that is the KNOWN server (first responder) →
-		//     mask back to the original FakeIP so STUN/DNS libs see the same src they sent to.
-		//  4. Server returned a real IP from a NEW source (Full Cone NAT P2P peer) →
-		//     allocate a stable peer FakeIP so the app can see and reply to the peer.
+		//  1. No address returned by proxy   → fall back to original session dst.
+		//  2. Address is already a vIP       → use as-is (no further translation).
+		//  3. Real IP == known server        → mask to original dst (STUN src matching).
+		//  4. Real IP != known server        → Full Cone NAT P2P peer:
+		//       peerReg set  → Allocate(realAddrPort) → stable vIP (Normal + FakeIP mode)
+		//       peerReg nil  → fakeIPPool.AllocatePeerFakeIP (legacy FakeIP-only path)
 		actualRemote := remoteAddr
 		if !actualRemote.IsValid() {
 			actualRemote = session.remoteAddr
-		} else if h.fakeIPPool != nil && !h.fakeIPPool.IsFakeIP(actualRemote.Addr()) {
-			realIP := actualRemote.Addr().Unmap()
-			if !session.serverRealIP.IsValid() {
-				// First response: record this as the "server" real IP.
-				session.serverRealIP = realIP
+		} else if h.peerReg != nil || h.fakeIPPool != nil {
+			isVIP := false
+			if h.fakeIPPool != nil {
+				isVIP = h.fakeIPPool.IsFakeIP(actualRemote.Addr())
 			}
-			if realIP == session.serverRealIP {
-				// Known server → mask to original FakeIP (preserves STUN src matching).
-				actualRemote = session.remoteAddr
-			} else {
-				// New source IP → Full Cone NAT P2P peer, allocate a fresh FakeIP.
-				// The FakeIP address family MUST match tunClientSrc so gVisor dialUDP
-				// does not mix IPv4 src with IPv6 dst (or vice-versa) → panic.
-				var peerFakeIP netip.Addr
-				clientAddr := tunClientSrc.Addr().Unmap()
-				if clientAddr.Is4() {
-					peerFakeIP = h.fakeIPPool.AllocatePeerFakeIP(realIP)
-				} else {
-					peerFakeIP = h.fakeIPPool.AllocatePeerFakeIPv6(realIP)
+			if !isVIP {
+				a := actualRemote.Addr().Unmap()
+				if a.Is4() {
+					b := a.As4()
+					isVIP = b[0] == 198 && (b[1] == 18 || b[1] == 19)
 				}
-				if peerFakeIP.IsValid() {
-					log.Printf("[TUN UDP] Peer FakeIP alloc: %s -> %s (session: %s)", realIP, peerFakeIP, tunClientSrc)
-					actualRemote = netip.AddrPortFrom(peerFakeIP, actualRemote.Port())
-					session.seenPeersMu.Lock()
-					if session.seenPeers == nil {
-						session.seenPeers = make(map[netip.Addr]struct{}, 4)
+			}
+
+			if !isVIP {
+				realIP := actualRemote.Addr().Unmap()
+				if !session.serverRealIP.IsValid() {
+					session.serverRealIP = realIP
+				}
+				if realIP == session.serverRealIP {
+					actualRemote = session.remoteAddr
+				} else {
+					var peerVIP netip.Addr
+					clientAddr := tunClientSrc.Addr().Unmap()
+
+					if h.peerReg != nil {
+						if clientAddr.Is4() {
+							peerVIP = h.peerReg.Allocate(actualRemote)
+						}
+					} else if h.fakeIPPool != nil {
+						if clientAddr.Is4() {
+							peerVIP = h.fakeIPPool.AllocatePeerFakeIP(realIP)
+						} else {
+							peerVIP = h.fakeIPPool.AllocatePeerFakeIPv6(realIP)
+						}
+						session.seenPeersMu.Lock()
+						if session.seenPeers == nil {
+							session.seenPeers = make(map[netip.Addr]struct{}, 4)
+						}
+						session.seenPeers[realIP] = struct{}{}
+						session.seenPeersMu.Unlock()
 					}
-					session.seenPeers[realIP] = struct{}{}
-					session.seenPeersMu.Unlock()
+
+					if peerVIP.IsValid() {
+						log.Printf("[TUN UDP] Peer vIP alloc: %s -> %s (session: %s)", realIP, peerVIP, tunClientSrc)
+						actualRemote = netip.AddrPortFrom(peerVIP, actualRemote.Port())
+					}
 				}
 			}
 		}
@@ -369,7 +414,11 @@ func (h *Handler) cleanupUDPSessions() {
 		case <-h.ctx.Done():
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-2 * time.Minute).UnixNano()
+			timeout := h.udpSessionTimeout
+			if timeout <= 0 {
+				timeout = 2 * time.Minute
+			}
+			cutoff := time.Now().Add(-timeout).UnixNano()
 			h.udpSessions.Range(func(k, value interface{}) bool {
 				session := value.(*udpSession)
 				if session.lastActive.Load() < cutoff {

@@ -217,6 +217,7 @@ class EWPVpnService : VpnService(), SocketProtector {
             setEnableFlow(node.enableFlow)
             setEnablePQC(node.enablePQC)
             setEnableMozillaCA(node.enableMozillaCA)
+            setDisableFakeIP(node.disableFakeIP)
             setTunMTU(VPN_MTU.toLong())
         }.build()
     }

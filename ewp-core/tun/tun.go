@@ -8,9 +8,10 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
-	"ewp-core/dns"
 	"ewp-core/log"
+	"ewp-core/nat"
 	"ewp-core/transport"
 	ewpbypass "ewp-core/tun/bypass"
 	ewpgvisor "ewp-core/tun/gvisor"
@@ -53,12 +54,14 @@ type Config struct {
 	Transport       transport.Transport
 	ServerAddr      string // proxy server address; used to detect the physical outbound interface for bypass dialing
 	TunnelDoHServer string // DoH server URL for tunnel DNS resolver (default: https://dns.google/dns-query)
+	DisableFakeIP   bool   // true = Normal Mode: no FakeIP pool; peer vIPs via ShardedRegistry only
 }
 
 type TUN struct {
 	device    tun.Device
 	stack     *ewpgvisor.Stack
 	handler   *Handler
+	peerReg   *nat.ShardedRegistry // Full Cone NAT registry; always non-nil after New()
 	config    *Config
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -70,12 +73,14 @@ func New(cfg *Config) (*TUN, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	udpWriter := &gvisorUDPWriter{stack: nil}
-	handler := NewHandler(ctx, cfg.Transport, udpWriter)
+	handler, reg := newHandlerCore(ctx, cfg, udpWriter)
+	startEviction(ctx, reg, 60*time.Second, 5*time.Minute)
 
-	// Initialize FakeIP pool for instant DNS responses (< 1ms, no tunnel needed)
-	fakeIPPool := dns.NewFakeIPPool()
-	handler.SetFakeIPPool(fakeIPPool)
-	log.Printf("[TUN] FakeIP DNS enabled (IPv4: 198.18.0.0/15, IPv6: fc00::/112)")
+	if !cfg.DisableFakeIP {
+		log.Printf("[TUN] FakeIP DNS enabled (IPv4: 198.18.0.0/15, IPv6: fc00::/112)")
+	} else {
+		log.Printf("[TUN] Normal Mode: FakeIP disabled, peer vIPs via ShardedRegistry")
+	}
 
 	mtu := uint32(cfg.MTU)
 	if mtu == 0 {
@@ -117,6 +122,7 @@ func New(cfg *Config) (*TUN, error) {
 		device:  tunDevice,
 		stack:   stack,
 		handler: handler,
+		peerReg: reg,
 		config:  cfg,
 		ctx:     ctx,
 		cancel:  cancel,

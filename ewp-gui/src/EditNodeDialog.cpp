@@ -72,6 +72,9 @@ void EditNodeDialog::setNode(const EWPNode &node)
 
     ui->checkEnableFlow->setChecked(node.enableFlow);
 
+    // DNS mode: 0=FakeIP (default), 1=Normal
+    ui->comboDNSMode->setCurrentIndex(node.disableFakeIP ? 1 : 0);
+
     updateVisibility();
 }
 
@@ -121,6 +124,9 @@ EWPNode EditNodeDialog::getNode() const
     node.dnsServer = ui->editDNS->text().trimmed();
 
     node.enableFlow = ui->checkEnableFlow->isChecked();
+
+    // DNS mode: index 0=FakeIP(disableFakeIP=false), index 1=Normal(disableFakeIP=true)
+    node.disableFakeIP = (ui->comboDNSMode->currentIndex() == 1);
 
     return node;
 }
