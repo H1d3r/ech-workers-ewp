@@ -15,7 +15,6 @@ import (
 	"ewp-core/transport"
 
 	masquego "github.com/quic-go/masque-go"
-	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -116,9 +115,9 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.(http.Flusher).Flush()
-
-	str := w.(http3.HTTPStreamer).HTTPStream()
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 
 	log.Info("[MASQUE] TCP tunnel: %s -> %s", r.RemoteAddr, target)
 
@@ -127,7 +126,7 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		bufp := tcpBufPool.Get().(*[]byte)
-		io.CopyBuffer(remote, str, *bufp)
+		io.CopyBuffer(remote, r.Body, *bufp)
 		tcpBufPool.Put(bufp)
 		if tc, ok := remote.(*net.TCPConn); ok {
 			tc.CloseWrite()
@@ -136,9 +135,12 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		bufp := tcpBufPool.Get().(*[]byte)
-		io.CopyBuffer(str, remote, *bufp)
+		fw := &flushWriter{w: w}
+		if f, ok := w.(http.Flusher); ok {
+			fw.f = f
+		}
+		io.CopyBuffer(fw, remote, *bufp)
 		tcpBufPool.Put(bufp)
-		str.Close()
 	}()
 	wg.Wait()
 	remote.Close()
@@ -172,4 +174,19 @@ func (h *Handler) handleUDP(w http.ResponseWriter, r *http.Request) {
 	if err := h.udpProxy.Proxy(w, req); err != nil {
 		log.Info("[MASQUE] UDP closed: %s -> %s: %v", r.RemoteAddr, req.Target, err)
 	}
+}
+
+// flushWriter wraps an io.Writer and optionally an http.Flusher
+// to ensure each Write is immediately flushed to the underlying stream.
+type flushWriter struct {
+	w io.Writer
+	f http.Flusher
+}
+
+func (fw *flushWriter) Write(p []byte) (n int, err error) {
+	n, err = fw.w.Write(p)
+	if fw.f != nil {
+		fw.f.Flush()
+	}
+	return
 }

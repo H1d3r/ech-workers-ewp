@@ -20,8 +20,6 @@ import (
 )
 
 const (
-	defaultInitialPacketSize = 1350
-
 	backoffInitial = 500 * time.Millisecond
 	backoffMax     = 30 * time.Second
 	backoffMult    = 2
@@ -139,7 +137,6 @@ func (t *Transport) initConfigs() error {
 		KeepAlivePeriod:                10 * time.Second,
 		EnableDatagrams:                true,
 		Allow0RTT:                      true,
-		InitialPacketSize:              defaultInitialPacketSize,
 	}
 	return nil
 }

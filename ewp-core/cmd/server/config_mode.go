@@ -320,7 +320,6 @@ func startMasqueListener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 		MaxConnectionReceiveWindow:     512 * 1024 * 1024,
 		EnableDatagrams:                true,
 		Allow0RTT:                      true,
-		InitialPacketSize:              1350,
 	}
 
 	h3Server := &http3.Server{
