@@ -205,6 +205,9 @@ func (r *RateLimiter) RecordFailure(ip string) {
 }
 
 // cleanup removes entries that are no longer banned and whose counters have reset.
+//
+// entry.resetTime is read under entry.mu to avoid a data race with Allow()'s
+// fast path, which writes entry.resetTime under entry.mu after releasing r.mu.
 func (r *RateLimiter) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -213,7 +216,10 @@ func (r *RateLimiter) cleanup() {
 		now := time.Now().Unix()
 		r.mu.Lock()
 		for ip, entry := range r.entries {
-			if entry.bannedUntil.Load() <= now && entry.resetTime <= now {
+			entry.mu.Lock()
+			reset := entry.resetTime
+			entry.mu.Unlock()
+			if entry.bannedUntil.Load() <= now && reset <= now {
 				delete(r.entries, ip)
 			}
 		}

@@ -235,6 +235,53 @@ func TestFlowReader_ActiveState_TempBufPooled(t *testing.T) {
 	}
 }
 
+// TestFlowReader_NoTruncation is the regression test for the silent data-drop bug.
+//
+// Setup: FlowState with a UUID the wire data does NOT match, so XtlsUnpadding
+// falls through and returns data directly (buf[:n] alias). The underlying reader
+// holds 200 bytes but p is only 100 bytes — the 2× read buffer therefore fills
+// completely and produces 200 bytes of unpadded output.
+//
+// Contract: all 200 bytes must be delivered across two Read calls. Before the
+// overflow fix, the second 100 bytes were silently dropped, desynchronising the
+// TCP stream and causing "network error" during file downloads.
+func TestFlowReader_NoTruncation(t *testing.T) {
+	const total = 200
+	const pSize = 100
+
+	// UUID that will NOT match the wire data prefix → XtlsUnpadding pass-through.
+	uuid := [16]byte{0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	state := NewFlowState(uuid[:])
+
+	// Wire data: total bytes, first 16 bytes deliberately ≠ uuid.
+	wire := make([]byte, total)
+	for i := range wire {
+		wire[i] = byte(i + 1)
+	}
+
+	src := bytes.NewReader(wire)
+	fr := NewFlowReader(src, state, true)
+	received := make([]byte, 0, total)
+
+	p := make([]byte, pSize)
+	for len(received) < total {
+		n, err := fr.Read(p)
+		if n > 0 {
+			received = append(received, p[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	if len(received) != total {
+		t.Fatalf("received %d bytes, want %d — overflow bytes were silently dropped", len(received), total)
+	}
+	if !bytes.Equal(received, wire) {
+		t.Fatal("received bytes do not match original data — stream corrupted")
+	}
+}
+
 // BenchmarkFlowReader_ActiveState_AllocsPerOp documents current alloc cost.
 func BenchmarkFlowReader_ActiveState_AllocsPerOp(b *testing.B) {
 	state := NewFlowState([]byte(testUUID[:]))
