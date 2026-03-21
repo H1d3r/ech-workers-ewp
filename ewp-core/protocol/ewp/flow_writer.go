@@ -131,10 +131,14 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 	}
 
 	n, err = r.reader.Read(buf)
-	if err != nil {
+	// Per io.Reader contract: a reader may return n > 0 AND a non-nil error
+	// (including io.EOF) in the same call. Process the n bytes first; surface
+	// the error only after all data has been delivered to the caller.
+	readErr := err
+	if n == 0 {
 		*bufp = buf
 		flowReadPool.Put(bufp)
-		return 0, err
+		return 0, readErr
 	}
 
 	var unpadded []byte
@@ -149,14 +153,17 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 	// Save any excess into r.overflow before returning the pool buffer.
 	// unpadded may alias buf (ProcessUplink returns buf[:n] when no padding
 	// is active), so the copy must happen before Put.
+	// If there is overflow, suppress readErr until the overflow is drained —
+	// returning EOF while data is still pending would cause the caller to stop.
 	if copied < len(unpadded) {
 		r.overflow = make([]byte, len(unpadded)-copied)
 		copy(r.overflow, unpadded[copied:])
+		readErr = nil
 	}
 
 	*bufp = buf
 	flowReadPool.Put(bufp)
-	return copied, nil
+	return copied, readErr
 }
 
 // Close closes the underlying reader if it implements io.Closer
