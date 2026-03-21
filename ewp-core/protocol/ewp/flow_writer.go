@@ -6,14 +6,12 @@ import (
 )
 
 // flowReadPool provides reusable read buffers for FlowReader.Read.
-// Pre-sized to 2× MaxPayloadLength to accommodate the largest possible
-// padded frame without a per-call make().
-//
-// The buffer is returned to the pool only after copy() and overflow extraction
-// are complete — never before ProcessUplink/ProcessDownlink finishes reading it.
+// Default size matches the typical TCP read buffer used by callers (32 KB).
+// The pool buffer is capped to len(p) on each call, so n ≤ len(p) always
+// holds and XtlsUnpadding output ≤ input ≤ len(p) — copy never truncates.
 var flowReadPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, 2*MaxPayloadLength)
+		b := make([]byte, 32*1024)
 		return &b
 	},
 }
@@ -76,16 +74,10 @@ func (w *FlowWriter) Close() error {
 }
 
 // FlowReader wraps a reader and removes Vision-style padding.
-//
-// overflow holds unpadded bytes that exceeded p's capacity on a previous Read.
-// These bytes were already consumed from the underlying reader and must be
-// delivered before making any new IO call; without this field they are silently
-// dropped, desynchronising the TCP stream and causing download errors.
 type FlowReader struct {
 	reader   io.Reader
 	state    *FlowState
 	isUplink bool
-	overflow []byte // leftover unpadded bytes not delivered on the previous call
 }
 
 // NewFlowReader creates a new flow reader
@@ -98,47 +90,24 @@ func NewFlowReader(reader io.Reader, state *FlowState, isUplink bool) *FlowReade
 }
 
 // Read reads and unpads data.
-//
-// Overflow contract: because the underlying reader is called with a buffer
-// twice the size of p (to absorb the largest possible padded frame), the
-// unpadded result can exceed len(p). Excess bytes are saved in r.overflow and
-// drained on the next call — they must never be discarded.
-//
-// Pool contract: the pool buffer is returned only after all reads from it are
-// complete (ProcessUplink/ProcessDownlink + overflow copy), preventing the
-// use-after-pool-return race that caused packet corruption.
+// The pool buffer is capped to len(p) bytes. ProcessUplink/ProcessDownlink strip
+// padding so output ≤ input ≤ len(p) — copy never truncates.
 func (r *FlowReader) Read(p []byte) (n int, err error) {
-	// Drain overflow before any IO — these bytes are already owned by the caller.
-	if len(r.overflow) > 0 {
-		n = copy(p, r.overflow)
-		r.overflow = r.overflow[n:]
-		if len(r.overflow) == 0 {
-			r.overflow = nil
-		}
-		return n, nil
-	}
-
 	if r.state == nil || r.state.ShouldDirectCopy(!r.isUplink) {
 		return r.reader.Read(p)
 	}
 
-	// Acquire a pooled buffer; grow if p is unusually large.
 	bufp := flowReadPool.Get().(*[]byte)
 	buf := *bufp
-	need := len(p) * 2
-	if len(buf) < need {
-		buf = make([]byte, need)
+	if len(buf) < len(p) {
+		buf = make([]byte, len(p))
 	}
 
-	n, err = r.reader.Read(buf)
-	// Per io.Reader contract: a reader may return n > 0 AND a non-nil error
-	// (including io.EOF) in the same call. Process the n bytes first; surface
-	// the error only after all data has been delivered to the caller.
-	readErr := err
+	n, err = r.reader.Read(buf[:len(p)])
 	if n == 0 {
 		*bufp = buf
 		flowReadPool.Put(bufp)
-		return 0, readErr
+		return 0, err
 	}
 
 	var unpadded []byte
@@ -149,21 +118,9 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 	}
 
 	copied := copy(p, unpadded)
-
-	// Save any excess into r.overflow before returning the pool buffer.
-	// unpadded may alias buf (ProcessUplink returns buf[:n] when no padding
-	// is active), so the copy must happen before Put.
-	// If there is overflow, suppress readErr until the overflow is drained —
-	// returning EOF while data is still pending would cause the caller to stop.
-	if copied < len(unpadded) {
-		r.overflow = make([]byte, len(unpadded)-copied)
-		copy(r.overflow, unpadded[copied:])
-		readErr = nil
-	}
-
 	*bufp = buf
 	flowReadPool.Put(bufp)
-	return copied, readErr
+	return copied, err
 }
 
 // Close closes the underlying reader if it implements io.Closer

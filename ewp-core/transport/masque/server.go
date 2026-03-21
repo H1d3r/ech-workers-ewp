@@ -37,6 +37,7 @@ var tcpBufPool = sync.Pool{
 // Both require a valid X-Masque-Auth header (see protocol/masque/auth.go).
 type Handler struct {
 	validUUIDs  [][16]byte
+	hmacCache   masqueauth.HMACKeyCache
 	udpTemplate *uritemplate.Template
 	udpProxy    masquego.Proxy
 	dialer      net.Dialer // shared, zero-value is valid; avoids per-request alloc
@@ -64,6 +65,7 @@ func NewHandler(udpTemplateStr string, uuids []string, newPH func() ewpserver.Pr
 			return nil, err
 		}
 	}
+	h.hmacCache = masqueauth.NewHMACKeyCache(h.validUUIDs)
 	return h, nil
 }
 
@@ -74,6 +76,7 @@ func (h *Handler) AddUUID(uuidStr string) error {
 		return err
 	}
 	h.validUUIDs = append(h.validUUIDs, uuid)
+	h.hmacCache = masqueauth.NewHMACKeyCache(h.validUUIDs)
 	return nil
 }
 
@@ -92,7 +95,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ── TCP CONNECT ──────────────────────────────────────────────────────────────
 
 func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
-	if _, err := masqueauth.ValidateAuthHeader(r.Header, h.validUUIDs); err != nil {
+	if _, err := masqueauth.ValidateAuthHeaderCached(r.Header, h.hmacCache); err != nil {
 		log.Warn("[MASQUE] TCP auth failed from %s: %v", r.RemoteAddr, err)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -151,7 +154,7 @@ func (h *Handler) handleTCP(w http.ResponseWriter, r *http.Request) {
 // ── UDP CONNECT-UDP ──────────────────────────────────────────────────────────
 
 func (h *Handler) handleUDP(w http.ResponseWriter, r *http.Request) {
-	if _, err := masqueauth.ValidateAuthHeader(r.Header, h.validUUIDs); err != nil {
+	if _, err := masqueauth.ValidateAuthHeaderCached(r.Header, h.hmacCache); err != nil {
 		log.Warn("[MASQUE] UDP auth failed from %s: %v", r.RemoteAddr, err)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
