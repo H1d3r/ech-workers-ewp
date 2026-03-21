@@ -93,8 +93,9 @@ func NewFlowReader(reader io.Reader, state *FlowState, isUplink bool) *FlowReade
 
 // Read reads and unpads data.
 // The temporary read buffer is taken from flowReadPool to avoid a per-call
-// heap allocation. The buffer is returned to the pool before Read returns,
-// so the caller must not retain any reference to it across calls.
+// heap allocation. The buffer is returned to the pool only after all reads
+// from it are complete (ProcessUplink/ProcessDownlink + copy), preventing a
+// use-after-pool-return data race that caused packet corruption under load.
 func (r *FlowReader) Read(p []byte) (n int, err error) {
 	if r.state == nil {
 		return r.reader.Read(p)
@@ -113,12 +114,9 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 	}
 
 	n, err = r.reader.Read(buf)
-	// Return the pool buffer before any further processing so it can be
-	// reused immediately by another goroutine.
-	*bufp = buf
-	flowReadPool.Put(bufp)
-
 	if err != nil {
+		*bufp = buf
+		flowReadPool.Put(bufp)
 		return 0, err
 	}
 
@@ -129,7 +127,11 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 		unpadded = r.state.ProcessDownlink(buf[:n])
 	}
 
+	// copy MUST happen before Put: ProcessUplink may return buf[:n] directly
+	// (when !WithinPaddingBuffers), meaning unpadded aliases the pool buffer.
 	copied := copy(p, unpadded)
+	*bufp = buf
+	flowReadPool.Put(bufp)
 	return copied, nil
 }
 
