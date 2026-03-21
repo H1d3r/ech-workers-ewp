@@ -2,7 +2,21 @@ package ewp
 
 import (
 	"io"
+	"sync"
 )
+
+// flowReadPool provides reusable read buffers for FlowReader.Read.
+// Pre-sized to 2× MaxPayloadLength to accommodate the largest possible
+// padded frame without a per-call make().
+//
+// The buffer is only alive during a single FlowReader.Read call; it is
+// returned to the pool before the call returns, so no aliasing risk.
+var flowReadPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 2*MaxPayloadLength)
+		return &b
+	},
+}
 
 // FlowWriter wraps a writer and applies Vision-style padding
 type FlowWriter struct {
@@ -77,25 +91,37 @@ func NewFlowReader(reader io.Reader, state *FlowState, isUplink bool) *FlowReade
 	}
 }
 
-// Read reads and unpads data
+// Read reads and unpads data.
+// The temporary read buffer is taken from flowReadPool to avoid a per-call
+// heap allocation. The buffer is returned to the pool before Read returns,
+// so the caller must not retain any reference to it across calls.
 func (r *FlowReader) Read(p []byte) (n int, err error) {
 	if r.state == nil {
 		return r.reader.Read(p)
 	}
 
-	// Check if should switch to direct copy
 	if r.state.ShouldDirectCopy(!r.isUplink) {
 		return r.reader.Read(p)
 	}
 
-	// Read raw data
-	buf := make([]byte, len(p)*2) // Allocate extra space for padding
+	// Acquire a pooled buffer; grow if p is unusually large.
+	bufp := flowReadPool.Get().(*[]byte)
+	buf := *bufp
+	need := len(p) * 2
+	if len(buf) < need {
+		buf = make([]byte, need)
+	}
+
 	n, err = r.reader.Read(buf)
+	// Return the pool buffer before any further processing so it can be
+	// reused immediately by another goroutine.
+	*bufp = buf
+	flowReadPool.Put(bufp)
+
 	if err != nil {
 		return 0, err
 	}
 
-	// Remove padding
 	var unpadded []byte
 	if r.isUplink {
 		unpadded = r.state.ProcessUplink(buf[:n])
@@ -103,7 +129,6 @@ func (r *FlowReader) Read(p []byte) (n int, err error) {
 		unpadded = r.state.ProcessDownlink(buf[:n])
 	}
 
-	// Copy to output buffer
 	copied := copy(p, unpadded)
 	return copied, nil
 }

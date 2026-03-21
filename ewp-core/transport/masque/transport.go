@@ -358,8 +358,12 @@ func (t *Transport) waitBackoff() error {
 	t.backoffMu.Unlock()
 	if d := time.Until(until); d > 0 {
 		log.V("[MASQUE] Backoff: waiting %v", d.Round(time.Millisecond))
+		// Use time.NewTimer + explicit Stop so the runtime timer is released
+		// immediately when stopCh fires, instead of leaking until d elapses.
+		timer := time.NewTimer(d)
+		defer timer.Stop()
 		select {
-		case <-time.After(d):
+		case <-timer.C:
 		case <-t.stopCh:
 			return errors.New("masque: transport closed")
 		}

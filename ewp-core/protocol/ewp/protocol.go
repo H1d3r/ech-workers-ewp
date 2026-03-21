@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/big"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -67,14 +66,13 @@ const (
 )
 
 func NewHandshakeRequest(uuid [16]byte, command byte, addr Address) *HandshakeRequest {
-	// 使用 crypto/rand 生成随机 Version (1-255)
-	versionBig, _ := rand.Int(rand.Reader, big.NewInt(255))
-	version := byte(versionBig.Int64() + 1)
+	// Version and padding length are traffic-obfuscation fields only — they do not
+	// need cryptographic randomness. FastIntn uses a pooled math/rand source and
+	// eliminates two crypto/rand syscalls + two big.Int heap allocations per call.
+	version := byte(FastIntn(255) + 1) // [1, 255]
 
-	// 使用 crypto/rand 生成随机 Padding 长度
-	paddingRange := MaxPaddingLength - MinPaddingLength + 1
-	paddingBig, _ := rand.Int(rand.Reader, big.NewInt(int64(paddingRange)))
-	paddingLen := byte(paddingBig.Int64() + MinPaddingLength)
+	paddingRange := int(MaxPaddingLength) - int(MinPaddingLength) + 1
+	paddingLen := byte(FastIntn(paddingRange) + int(MinPaddingLength))
 
 	req := &HandshakeRequest{
 		Version:       version,
@@ -85,6 +83,7 @@ func NewHandshakeRequest(uuid [16]byte, command byte, addr Address) *HandshakeRe
 		Options:       0,
 		PaddingLength: paddingLen,
 	}
+	// Nonce IS security-critical: keep crypto/rand.
 	if _, err := rand.Read(req.Nonce[:]); err != nil {
 		panic("ewp: crypto/rand failed: " + err.Error())
 	}
@@ -313,22 +312,136 @@ func computeResponseHMAC(uuid [16]byte, msg []byte) []byte {
 	return h.Sum(nil)
 }
 
-func ReadHandshake(r io.Reader) ([]byte, error) {
-	header := make([]byte, 15)
-	if _, err := io.ReadFull(r, header); err != nil {
-		return nil, err
+// HMACKeyCache maps each UUID to its precomputed sha256(uuid) HMAC key.
+// Build once at startup via NewHMACKeyCache; pass to DecodeHandshakeRequestCached
+// to eliminate per-request SHA-256 key derivation on the hot path.
+type HMACKeyCache map[[16]byte][32]byte
+
+// NewHMACKeyCache precomputes sha256(uuid) for every UUID.
+// Call this once during server initialisation and reuse the result for the
+// lifetime of the process — sha256.Sum256(uuid) is a constant per UUID.
+func NewHMACKeyCache(uuids [][16]byte) HMACKeyCache {
+	cache := make(HMACKeyCache, len(uuids))
+	for _, uuid := range uuids {
+		cache[uuid] = sha256.Sum256(uuid[:])
+	}
+	return cache
+}
+
+// computeHMACWithKey is the cached-key variant of computeHMAC.
+// keyHash is sha256(uuid) precomputed by NewHMACKeyCache.
+func computeHMACWithKey(keyHash [32]byte, ad, ciphertext []byte) []byte {
+	h := hmac.New(sha256.New, keyHash[:])
+	h.Write(ad)
+	h.Write(ciphertext)
+	sum := h.Sum(nil)
+	return sum[:16]
+}
+
+// DecodeHandshakeRequestCached is the hot-path variant of DecodeHandshakeRequest.
+// It uses precomputed HMAC keys from a HMACKeyCache, eliminating the
+// sha256.Sum256(uuid) call that would otherwise occur for every UUID candidate
+// on every incoming connection.
+func DecodeHandshakeRequestCached(data []byte, cache HMACKeyCache) (*HandshakeRequest, error) {
+	if len(data) < 15+MinPayloadLength+16 {
+		return nil, ErrInvalidLength
 	}
 
-	payloadLen := binary.BigEndian.Uint16(header[13:15])
+	version := data[0]
+	if version == 0 {
+		return nil, ErrInvalidVersion
+	}
+
+	var nonce [12]byte
+	copy(nonce[:], data[1:13])
+
+	payloadLen := binary.BigEndian.Uint16(data[13:15])
 	if payloadLen < MinPayloadLength || payloadLen > MaxPayloadLength {
 		return nil, ErrInvalidLength
 	}
 
-	rest := make([]byte, int(payloadLen)+16)
-	if _, err := io.ReadFull(r, rest); err != nil {
+	if len(data) < 15+int(payloadLen)+16 {
+		return nil, ErrInvalidLength
+	}
+
+	ad := data[0:15]
+	ciphertext := data[15 : 15+payloadLen]
+	authTag := data[15+payloadLen : 15+payloadLen+16]
+
+	for uuid, keyHash := range cache {
+		// Use precomputed keyHash — no sha256.Sum256 per iteration.
+		expectedTag := computeHMACWithKey(keyHash, ad, ciphertext)
+		if !hmac.Equal(authTag, expectedTag) {
+			continue
+		}
+
+		key := deriveEncryptionKey(uuid, nonce)
+		aead, err := chacha20poly1305.New(key)
+		if err != nil {
+			continue
+		}
+
+		plaintext, err := aead.Open(nil, nonce[:], ciphertext, ad)
+		if err != nil {
+			continue
+		}
+
+		req := &HandshakeRequest{
+			Version: version,
+			Nonce:   nonce,
+		}
+
+		if len(plaintext) < 4+16+1+1+1+1 {
+			continue
+		}
+
+		req.Timestamp = binary.BigEndian.Uint32(plaintext[0:4])
+		copy(req.UUID[:], plaintext[4:20])
+		req.Command = plaintext[20]
+
+		now := time.Now().Unix()
+		if math.Abs(float64(int64(req.Timestamp)-now)) > TimeWindow {
+			return nil, ErrInvalidTimestamp
+		}
+
+		addr, addrLen, err := DecodeAddress(plaintext[21:])
+		if err != nil {
+			continue
+		}
+		req.TargetAddr = addr
+
+		offset := 21 + addrLen
+		if len(plaintext) < offset+2 {
+			continue
+		}
+
+		req.Options = plaintext[offset]
+		req.PaddingLength = plaintext[offset+1]
+
+		return req, nil
+	}
+
+	return nil, ErrInvalidAuth
+}
+
+func ReadHandshake(r io.Reader) ([]byte, error) {
+	// Read the 15-byte AD header onto the stack; parse payloadLen before any
+	// heap allocation so we need exactly one make() for the complete packet.
+	var hdr [15]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
 
-	fullData := append(header, rest...)
+	payloadLen := binary.BigEndian.Uint16(hdr[13:15])
+	if payloadLen < MinPayloadLength || payloadLen > MaxPayloadLength {
+		return nil, ErrInvalidLength
+	}
+
+	// Single allocation: AD(15) + ciphertext(payloadLen) + outer HMAC(16).
+	fullData := make([]byte, 15+int(payloadLen)+16)
+	copy(fullData, hdr[:])
+	if _, err := io.ReadFull(r, fullData[15:]); err != nil {
+		return nil, err
+	}
 	return fullData, nil
 }

@@ -17,15 +17,14 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/yosida95/uritemplate/v3"
 )
 
 const capsuleProtocolHeaderValue = "?1"
 
-// contextIDZero is the varint-encoded context ID 0 prefix required by RFC 9298.
-// It is always a single 0x00 byte but we compute it properly via quicvarint.
-var contextIDZero = quicvarint.Append([]byte{}, 0)
+// contextIDZero is the context-id=0 prefix required by RFC 9298 §4.
+// QUIC variable-length integer encoding of 0 is exactly 0x00 (one byte).
+var contextIDZero = []byte{0x00}
 
 // udpWritePool reuses send-side datagram buffers to eliminate per-packet
 // heap allocations on the UDP hot path.
@@ -228,11 +227,7 @@ func (c *Conn) ReadUDP() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, n, err := quicvarint.Parse(data)
-	if err != nil {
-		return nil, fmt.Errorf("masque: parse context-id: %w", err)
-	}
-	return data[n:], nil
+	return stripContextID(data)
 }
 
 // ReadUDPTo reads a UDP datagram payload into buf (zero-copy path).
@@ -242,11 +237,11 @@ func (c *Conn) ReadUDPTo(buf []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, n, err := quicvarint.Parse(data)
+	payload, err := stripContextID(data)
 	if err != nil {
-		return 0, fmt.Errorf("masque: parse context-id: %w", err)
+		return 0, err
 	}
-	return copy(buf, data[n:]), nil
+	return copy(buf, payload), nil
 }
 
 // ReadUDPFrom reads a UDP datagram and returns its payload plus the source address.
@@ -285,6 +280,27 @@ func (c *Conn) Close() error {
 // StartPing is a no-op; QUIC KeepAlivePeriod handles liveness.
 func (c *Conn) StartPing(_ time.Duration) chan struct{} {
 	return nil
+}
+
+// stripContextID strips the RFC 9298 context-id=0 prefix from a raw QUIC datagram.
+//
+// Fast-path contract: QUIC variable-length integer encoding of 0 is exactly the
+// single byte 0x00 (two-bit prefix 00, six-bit value 000000). We exploit this
+// instead of calling quicvarint.Parse, eliminating an allocation and two
+// branches per datagram on the UDP receive hot path.
+//
+// Returns an error if data is empty or if the first byte is not 0x00 (i.e., an
+// unsupported context-id is present — RFC 9298 §4 requires clients to ignore
+// datagrams with unknown context-ids, but we surface it as an error so the
+// caller can log and skip rather than silently misbehave).
+func stripContextID(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("masque: empty datagram")
+	}
+	if data[0] != 0x00 {
+		return nil, fmt.Errorf("masque: unsupported context-id 0x%02x", data[0])
+	}
+	return data[1:], nil
 }
 
 // escapeHost percent-encodes colons in IPv6 addresses per RFC 6570.
