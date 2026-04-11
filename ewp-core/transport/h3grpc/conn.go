@@ -719,12 +719,34 @@ func (c *Conn) StartPing(interval time.Duration) chan struct{} {
 	return make(chan struct{})
 }
 
-// receiveLoop receives and processes incoming messages
+// receiveLoop reads from the H3 stream, decodes frames, and pushes content
+// into recvChan via an internal pending queue so the QUIC receive window is
+// never stalled by a slow consumer.
 func (c *Conn) receiveLoop() {
 	defer c.wg.Done()
 	defer c.signalClose()
 
+	// pendingBuf 解耦网络读取和 channel 投递：
+	// 当 recvChan 满时，已解码的数据先积压在这里，读取循环继续推进
+	// QUIC 接收窗口，避免对端发送窗口耗尽而卡死整条连接。
+	var pendingBuf [][]byte
+
 	for {
+		// 先尝试非阻塞地清空积压队列
+		for len(pendingBuf) > 0 {
+			select {
+			case c.recvChan <- pendingBuf[0]:
+				pendingBuf[0] = nil
+				pendingBuf = pendingBuf[1:]
+			case <-c.closeChan:
+				return
+			default:
+				// recvChan 仍满，先去读新数据
+				goto readNext
+			}
+		}
+
+	readNext:
 		// Decode gRPC-Web frame
 		data, err := c.decoder.Decode()
 		if err != nil {
@@ -741,18 +763,18 @@ func (c *Conn) receiveLoop() {
 			continue
 		}
 
-		// Get content (flow padding is removed on server side)
 		content := socketData.Content
-
 		if len(content) == 0 {
 			continue
 		}
 
-		// Send to receive channel
+		// 尝试非阻塞投递；满了则先积压，下一轮循环再投
 		select {
 		case c.recvChan <- content:
 		case <-c.closeChan:
 			return
+		default:
+			pendingBuf = append(pendingBuf, content)
 		}
 	}
 }

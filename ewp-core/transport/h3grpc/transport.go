@@ -348,8 +348,8 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		password:   t.password,
 		enableFlow: t.enableFlow,
 		useTrojan:  t.useTrojan,
-		recvChan:   make(chan []byte, 32),
-		sendChan:   make(chan []byte, 32),
+		recvChan:   make(chan []byte, 256), // 加大缓冲：减少 receiveLoop 积压到 pendingBuf 的频率
+		sendChan:   make(chan []byte, 256),
 		closeChan:  make(chan struct{}),
 		connReady:  make(chan struct{}),
 	}
