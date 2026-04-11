@@ -57,7 +57,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     
     init {
-        loadApps()
+        // 应用列表由 MainActivity.onResume() 触发加载，此处不重复调用
+        // 包安装/卸载事件由 AppRepository 内部的广播接收器自动处理
     }
     
     fun addNode(node: EWPNode) {
@@ -129,5 +130,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         vpnRepository.unregister()
+        appRepository.unregister()
     }
 }

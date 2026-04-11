@@ -1,16 +1,22 @@
 package com.echworkers.android.data
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.util.Log
 import com.echworkers.android.model.AppInfo
 import com.echworkers.android.model.ProxyConfig
 import com.echworkers.android.model.ProxyMode
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -25,6 +31,7 @@ class AppRepository(private val context: Context) {
     
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     
     private val _installedApps = MutableStateFlow<List<AppInfo>>(emptyList())
     val installedApps: StateFlow<List<AppInfo>> = _installedApps.asStateFlow()
@@ -34,9 +41,40 @@ class AppRepository(private val context: Context) {
     
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-    
+
+    // 监听应用安装/卸载/更新事件，自动刷新列表
+    private val packageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            val pkg = intent.data?.schemeSpecificPart ?: "unknown"
+            Log.i(TAG, "Package changed: action=$action, pkg=$pkg")
+            scope.launch { loadInstalledApps() }
+        }
+    }
+
     init {
         loadProxyConfig()
+        registerPackageReceiver()
+    }
+
+    private fun registerPackageReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        context.registerReceiver(packageReceiver, filter)
+        Log.d(TAG, "Package change receiver registered")
+    }
+
+    fun unregister() {
+        try {
+            context.unregisterReceiver(packageReceiver)
+            Log.d(TAG, "Package change receiver unregistered")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unregister package receiver", e)
+        }
     }
     
     suspend fun loadInstalledApps() {

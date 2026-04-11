@@ -48,6 +48,12 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        // 每次 app 回到前台时刷新应用列表，确保新安装/卸载的应用能被感知
+        viewModel?.loadApps()
+    }
     
     private fun requestVpnPermission() {
         val intent = VpnService.prepare(this)

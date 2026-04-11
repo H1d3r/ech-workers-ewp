@@ -227,13 +227,24 @@ class EWPVpnService : VpnService(), SocketProtector {
     }
     
     private fun configureProxyMode(builder: Builder) {
-        builder.addDisallowedApplication(packageName)
-        
         when (proxyConfig.mode) {
             ProxyMode.GLOBAL -> {
+                // 全局模式：仅排除自身，所有其他 app 走 VPN
+                try {
+                    builder.addDisallowedApplication(packageName)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to disallow self in GLOBAL mode", e)
+                }
+                Log.d(TAG, "Proxy mode: GLOBAL")
             }
-            
+
             ProxyMode.BYPASS -> {
+                // 绕过模式：自身 + 选中的 app 直连，其他走 VPN
+                try {
+                    builder.addDisallowedApplication(packageName)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to disallow self in BYPASS mode", e)
+                }
                 proxyConfig.selectedPackages.forEach { pkg ->
                     try {
                         builder.addDisallowedApplication(pkg)
@@ -242,16 +253,31 @@ class EWPVpnService : VpnService(), SocketProtector {
                         Log.w(TAG, "Failed to bypass app: $pkg", e)
                     }
                 }
+                Log.d(TAG, "Proxy mode: BYPASS, bypassed ${proxyConfig.selectedPackages.size} apps")
             }
-            
+
             ProxyMode.PROXY_ONLY -> {
-                proxyConfig.selectedPackages.forEach { pkg ->
+                // 仅代理模式：使用白名单，只有选中的 app 走 VPN
+                // 注意：addAllowedApplication 与 addDisallowedApplication 不能混用
+                // 自身始终直连，不加入白名单
+                if (proxyConfig.selectedPackages.isEmpty()) {
+                    // 没有选择任何 app 时，退化为全局模式以避免全部直连
                     try {
-                        builder.addAllowedApplication(pkg)
-                        Log.d(TAG, "Allow app: $pkg")
+                        builder.addDisallowedApplication(packageName)
                     } catch (e: Exception) {
-                        Log.w(TAG, "Failed to allow app: $pkg", e)
+                        Log.w(TAG, "Failed to disallow self in PROXY_ONLY (empty) mode", e)
                     }
+                    Log.w(TAG, "Proxy mode: PROXY_ONLY with no apps selected, fallback to GLOBAL")
+                } else {
+                    proxyConfig.selectedPackages.forEach { pkg ->
+                        try {
+                            builder.addAllowedApplication(pkg)
+                            Log.d(TAG, "Allow app: $pkg")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to allow app: $pkg", e)
+                        }
+                    }
+                    Log.d(TAG, "Proxy mode: PROXY_ONLY, allowed ${proxyConfig.selectedPackages.size} apps")
                 }
             }
         }
