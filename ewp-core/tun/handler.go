@@ -141,6 +141,8 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 }
 
 func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) {
+	log.V("[TUN UDP] HandleUDP: src=%s dst=%s payload_len=%d", src, dst, len(payload))
+	
 	// DNS interception: use FakeIP for instant response
 	if dst.Port() == 53 && h.fakeIPPool != nil {
 		h.handleDNSFakeIP(payload, src, dst)
@@ -200,6 +202,7 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 				return
 			}
 
+			log.V("[TUN UDP] ConnectUDP success: endpoint=%v", endpoint)
 			go h.udpReadLoop(src, session)
 		}
 	} else {
@@ -210,7 +213,8 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 
 	// Forward UDP payload to the target via the proxy tunnel
 	if err := session.tunnelConn.WriteUDP(endpoint, payload); err != nil {
-		log.V("[TUN UDP] Packet send failed: %v", err)
+		log.Warn("[TUN UDP] WriteUDP failed for %s: %v", endpoint, err)
+		return
 	}
 }
 
@@ -236,6 +240,7 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 			log.V("[TUN UDP] Session read loop closed for %s: %v", tunClientSrc, err)
 			return
 		}
+		log.V("[TUN UDP] Read response: remoteAddr=%s payloadLen=%d", remoteAddr, n)
 
 		if h.udpWriter == nil || h.ctx.Err() != nil {
 			return

@@ -149,6 +149,8 @@ func (h *udpHandler) handleStream(reader io.Reader, done chan struct{}) {
 			}
 			return
 		}
+		log.V("[Server UDP] Decoded: GlobalID=%x Status=%d Target=%v PayloadLen=%d", 
+			pkt.GlobalID[:4], pkt.Status, pkt.Target, len(pkt.Payload))
 		h.dispatch(pkt)
 	}
 }
@@ -173,7 +175,12 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 		// 任意远端均可向该端口发包 → 真正的 Full-Cone NAT。
 		// （DialUDP 是 connected socket，内核仅接受 pkt.Target 来源的回包，
 		//  导致 P2P / WebRTC ICE / 负载均衡场景下回包被内核过滤丢弃。）
-		conn, err := net.ListenUDP("udp", &net.UDPAddr{})
+		// 根据目标地址类型选择合适的网络协议：IPv4或IPv6
+		network := "udp4"
+		if pkt.Target.IP.To4() == nil {
+			network = "udp6"
+		}
+		conn, err := net.ListenUDP(network, &net.UDPAddr{})
 		if err != nil {
 			log.Warn("UDP listen error: %v", err)
 			h.remove(pkt.GlobalID)

@@ -96,7 +96,12 @@ func (h *trojanUDPHandler) handleStream(reader io.Reader, done chan struct{}) {
 		// Create session on first packet
 		h.mu.Lock()
 		if h.session == nil {
-			conn, err := net.ListenUDP("udp", &net.UDPAddr{})
+			// 根据目标地址类型选择合适的网络协议：IPv4或IPv6
+			network := "udp4"
+			if target.IP.To4() == nil {
+				network = "udp6"
+			}
+			conn, err := net.ListenUDP(network, &net.UDPAddr{})
 			if err != nil {
 				h.mu.Unlock()
 				log.Warn("Trojan UDP listen error: %v", err)
