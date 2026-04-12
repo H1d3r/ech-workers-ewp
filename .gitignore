@@ -18,3 +18,20 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Go build artifacts — never commit binaries
+*.exe
+*.out
+ech-workers
+ech-workers-*
+proxy-server
+proxy-server-*
+ewp-server
+ewp-client
+*-linux
+*-macos
+*-windows
+
+# DLL files (except wintun.dll which is a required runtime dependency)
+*.dll
+!ewp-core/wintun.dll
