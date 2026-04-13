@@ -237,7 +237,7 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		}
-		server.HandleUDPConnection(r.Body, &flushWriter{w: w, f: flusher})
+		server.HandleUDPConnection(r.Body, &flushWriter{w: w, f: flusher}, result.Target)
 		return
 	}
 

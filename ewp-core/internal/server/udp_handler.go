@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -71,15 +72,17 @@ func (s *udpSession) close() {
 
 // udpHandler 管理单个客户端连接的全部 UDP 会话。
 type udpHandler struct {
-	mu       sync.Mutex
-	sessions map[[8]byte]*udpSession
-	writer   *chanWriter
+	mu              sync.Mutex
+	sessions        map[[8]byte]*udpSession
+	writer          *chanWriter
+	handshakeTarget string // 握手时客户端提供的目标地址 (domain:port 或 ip:port)
 }
 
-func newUDPHandler(w io.Writer) *udpHandler {
+func newUDPHandler(w io.Writer, handshakeTarget string) *udpHandler {
 	return &udpHandler{
-		sessions: make(map[[8]byte]*udpSession),
-		writer:   newChanWriter(w),
+		sessions:        make(map[[8]byte]*udpSession),
+		writer:          newChanWriter(w),
+		handshakeTarget: handshakeTarget,
 	}
 }
 
@@ -166,18 +169,43 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 	s, created := h.getOrCreate(pkt.GlobalID)
 
 	if created {
-		// 新 session：必须是 New 状态且带目标地址
-		if pkt.Status != ewp.UDPStatusNew || pkt.Target == nil {
+		// 新 session：必须是 New 状态
+		if pkt.Status != ewp.UDPStatusNew {
 			h.remove(pkt.GlobalID)
 			return
 		}
+
+		// 确定目标地址：优先使用帧内地址，若缺失则用握手域名解析
+		target := pkt.Target
+		if target == nil && h.handshakeTarget != "" {
+			// 客户端发送了域名（非 IP），帧内无法携带域名，服务端自行解析
+			host, portStr, err := net.SplitHostPort(h.handshakeTarget)
+			if err != nil {
+				log.Warn("UDP parse handshake target %q: %v", h.handshakeTarget, err)
+				h.remove(pkt.GlobalID)
+				return
+			}
+			ips, err := net.LookupIP(host)
+			if err != nil || len(ips) == 0 {
+				log.Warn("UDP resolve handshake domain %q: %v", host, err)
+				h.remove(pkt.GlobalID)
+				return
+			}
+			port := 0
+			fmt.Sscanf(portStr, "%d", &port)
+			target = &net.UDPAddr{IP: ips[0], Port: port}
+			log.Debug("UDP resolved handshake domain %q -> %s", host, target)
+		}
+		if target == nil {
+			log.Warn("UDP new session without target (GlobalID: %x)", pkt.GlobalID[:4])
+			h.remove(pkt.GlobalID)
+			return
+		}
+
 		// ListenUDP（非连接 socket）：服务器绑定随机本地端口。
 		// 任意远端均可向该端口发包 → 真正的 Full-Cone NAT。
-		// （DialUDP 是 connected socket，内核仅接受 pkt.Target 来源的回包，
-		//  导致 P2P / WebRTC ICE / 负载均衡场景下回包被内核过滤丢弃。）
-		// 根据目标地址类型选择合适的网络协议：IPv4或IPv6
 		network := "udp4"
-		if pkt.Target.IP.To4() == nil {
+		if target.IP.To4() == nil {
 			network = "udp6"
 		}
 		conn, err := net.ListenUDP(network, &net.UDPAddr{})
@@ -187,9 +215,9 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 			return
 		}
 		s.conn = conn
-		s.initTarget = pkt.Target
+		s.initTarget = target
 		s.updateActive()
-		log.Debug("UDP new session: %s (GlobalID: %x)", pkt.Target, pkt.GlobalID[:4])
+		log.Debug("UDP new session: %s (GlobalID: %x)", target, pkt.GlobalID[:4])
 		go h.sessionWorker(s)
 	} else if s.conn == nil {
 		return
@@ -294,8 +322,10 @@ func (h *udpHandler) receiveResponses(s *udpSession) {
 }
 
 // HandleUDPConnection 处理 UDP 模式连接，每次调用独立隔离所有状态。
-func HandleUDPConnection(reader io.Reader, writer io.Writer) {
-	h := newUDPHandler(writer)
+// handshakeTarget 是握手阶段客户端提供的目标地址（domain:port 或 ip:port），
+// 当 UDP 帧中未携带目标 IP 时（域名场景），服务端使用此地址进行 DNS 解析。
+func HandleUDPConnection(reader io.Reader, writer io.Writer, handshakeTarget string) {
+	h := newUDPHandler(writer, handshakeTarget)
 	done := make(chan struct{})
 
 	go h.handleStream(reader, done)
