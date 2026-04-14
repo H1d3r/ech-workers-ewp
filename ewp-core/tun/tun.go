@@ -17,31 +17,8 @@ import (
 	tunsetup "ewp-core/tun/setup"
 
 	tun "golang.zx2c4.com/wireguard/tun"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
-
-type gvisorUDPWriter struct {
-	stack *ewpgvisor.Stack
-}
-
-func (w *gvisorUDPWriter) WriteTo(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
-	if w.stack == nil {
-		return fmt.Errorf("stack is nil")
-	}
-	return w.stack.WriteUDP(p, src, dst)
-}
-
-func (w *gvisorUDPWriter) InjectUDP(p []byte, src netip.AddrPort, dst netip.AddrPort) error {
-	if w.stack == nil {
-		return fmt.Errorf("stack is nil")
-	}
-	return w.stack.InjectUDP(p, src, dst)
-}
-
-func (w *gvisorUDPWriter) ReleaseConn(src netip.AddrPort, dst netip.AddrPort) {
-	if w.stack != nil {
-		w.stack.ReleaseWriteConn(src, dst)
-	}
-}
 
 type Config struct {
 	IP              string
@@ -69,8 +46,7 @@ type TUN struct {
 func New(cfg *Config) (*TUN, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	udpWriter := &gvisorUDPWriter{stack: nil}
-	handler := NewHandler(ctx, cfg.Transport, udpWriter)
+	handler := NewHandler(ctx, cfg.Transport)
 
 	// Initialize FakeIP pool for instant DNS responses (< 1ms, no tunnel needed)
 	fakeIPPool := dns.NewFakeIPPool()
@@ -101,7 +77,9 @@ func New(cfg *Config) (*TUN, error) {
 	stackConfig := &ewpgvisor.StackConfig{
 		MTU:        int(mtu),
 		TCPHandler: handler.HandleTCP,
-		UDPHandler: handler.HandleUDP,
+		UDPHandler: func(conn *gonet.UDPConn, payload []byte, src netip.AddrPort, dst netip.AddrPort) {
+			handler.HandleUDP(conn, payload, src, dst)
+		},
 	}
 
 	stack, err := ewpgvisor.NewStack(tunDevice, stackConfig)
@@ -110,8 +88,6 @@ func New(cfg *Config) (*TUN, error) {
 		cancel()
 		return nil, fmt.Errorf("create gvisor stack failed: %w", err)
 	}
-
-	udpWriter.stack = stack
 
 	return &TUN{
 		device:  tunDevice,

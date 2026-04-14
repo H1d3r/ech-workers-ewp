@@ -40,7 +40,11 @@ type cachedUDPConn struct {
 type StackConfig struct {
 	MTU        int
 	TCPHandler func(conn *gonet.TCPConn)
-	UDPHandler func(payload []byte, src netip.AddrPort, dst netip.AddrPort)
+	// UDPHandler receives the first packet of a UDP flow along with the
+	// gonet.UDPConn that gVisor created for it. The handler owns the conn
+	// and is responsible for closing it. Subsequent packets on the same
+	// (src, dst) flow arrive on the same conn via its Read loop.
+	UDPHandler func(conn *gonet.UDPConn, payload []byte, src netip.AddrPort, dst netip.AddrPort)
 }
 
 type Stack struct {
@@ -181,12 +185,11 @@ func (s *Stack) setupUDPForwarder() {
 }
 
 // udpReadLoop reads incoming UDP packets from the gVisor endpoint and dispatches
-// them to the configured handler. Uses gonet.UDPConn (high-level API) so that
-// the waiter is managed internally and a single pre-allocated buffer serves the
-// entire session lifetime — zero per-packet heap allocation.
+// them to the configured handler. conn is always passed so the handler can write
+// responses directly back through the same gVisor socket — avoiding the port
+// conflict that arises when trying to DialUDP on an already-bound (src,dst) pair.
+// The handler is responsible for closing conn when the session ends.
 func (s *Stack) udpReadLoop(conn *gonet.UDPConn, src, dst netip.AddrPort) {
-	defer conn.Close()
-
 	buf := make([]byte, s.config.MTU+4)
 	for {
 		n, err := conn.Read(buf)
@@ -194,7 +197,7 @@ func (s *Stack) udpReadLoop(conn *gonet.UDPConn, src, dst netip.AddrPort) {
 			return
 		}
 		if n > 0 {
-			s.config.UDPHandler(buf[:n], src, dst)
+			s.config.UDPHandler(conn, buf[:n], src, dst)
 		}
 	}
 }
