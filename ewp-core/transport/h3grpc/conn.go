@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -366,29 +365,33 @@ func (c *Conn) ewpConnectUDP(target transport.Endpoint, initialData []byte) erro
 	// Always send UDPStatusNew to establish session on server (with target address)
 	c.udpGlobalID = ewp.NewGlobalID()
 
-	targetAddr := target.Addr
-	if target.Domain != "" && !targetAddr.IsValid() {
-		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
-			if ip4 := ips[0].To4(); ip4 != nil {
-				ip, _ := netip.AddrFromSlice(ip4)
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			} else {
-				ip, _ := netip.AddrFromSlice(ips[0].To16())
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			}
+	var encoded []byte
+	if target.Domain != "" {
+		// Send domain directly to server; local DNS resolution would return a FakeIP in TUN mode.
+		pkt := &ewp.UDPPacketDomain{
+			GlobalID: c.udpGlobalID,
+			Status:   ewp.UDPStatusNew,
+			Domain:   target.Domain,
+			Port:     target.Port,
+			Payload:  initialData,
 		}
-	}
-
-	pkt := &ewp.UDPPacketAddr{
-		GlobalID: c.udpGlobalID,
-		Status:   ewp.UDPStatusNew,
-		Target:   targetAddr,
-		Payload:  initialData,
-	}
-
-	encoded, err := ewp.EncodeUDPAddrPacket(pkt)
-	if err != nil {
-		return fmt.Errorf("encode UDP packet: %w", err)
+		var encErr error
+		encoded, encErr = ewp.EncodeUDPDomainPacket(pkt)
+		if encErr != nil {
+			return fmt.Errorf("encode UDP domain packet: %w", encErr)
+		}
+	} else {
+		pkt := &ewp.UDPPacketAddr{
+			GlobalID: c.udpGlobalID,
+			Status:   ewp.UDPStatusNew,
+			Target:   target.Addr,
+			Payload:  initialData,
+		}
+		var encErr error
+		encoded, encErr = ewp.EncodeUDPAddrPacket(pkt)
+		if encErr != nil {
+			return fmt.Errorf("encode UDP packet: %w", encErr)
+		}
 	}
 
 	// Apply flow padding if enabled
@@ -438,26 +441,18 @@ func (c *Conn) WriteUDP(target transport.Endpoint, data []byte) error {
 		return c.Write(buf)
 	}
 
-	targetAddr := target.Addr
-	if target.Domain != "" && !targetAddr.IsValid() {
-		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
-			if ip4 := ips[0].To4(); ip4 != nil {
-				ip, _ := netip.AddrFromSlice(ip4)
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			} else {
-				ip, _ := netip.AddrFromSlice(ips[0].To16())
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			}
-		}
+	if target.Domain != "" {
+		buf := make([]byte, 0, 2+8+1+1+(1+1+len(target.Domain)+2)+2+len(data))
+		buf = ewp.AppendUDPDomainFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Domain, target.Port, data)
+		return c.Write(buf)
 	}
 
 	addrLen := 7
-	if targetAddr.IsValid() && targetAddr.Addr().Is6() {
+	if target.Addr.IsValid() && target.Addr.Addr().Is6() {
 		addrLen = 19
 	}
-	totalCap := 2 + 8 + 1 + 1 + addrLen + 2 + len(data)
-	buf := make([]byte, 0, totalCap)
-	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, targetAddr, data)
+	buf := make([]byte, 0, 2+8+1+1+addrLen+2+len(data))
+	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Addr, data)
 	return c.Write(buf)
 }
 

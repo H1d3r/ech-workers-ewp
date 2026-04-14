@@ -17,11 +17,20 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
-// udpSession represents a proxy tunnel connection for a specific local UDP socket
+// udpSessionKey identifies a unique UDP flow: one local socket sending to one destination.
+// Using (src, dst) instead of src-only enables correct per-destination fakeAddr tracking,
+// which is required for NAT type detection tools that send from the same local port to
+// multiple different servers and expect responses from each server's own address.
+type udpSessionKey struct {
+	src netip.AddrPort
+	dst netip.AddrPort
+}
+
+// udpSession represents a proxy tunnel connection for a specific (src, dst) UDP flow.
 type udpSession struct {
 	tunnelConn transport.TunnelConn
 	remoteAddr netip.AddrPort // the remote server addr (responses appear to come FROM here)
-	fakeAddr   netip.AddrPort // FakeIP:Port that the client originally sent to (for Full Cone NAT)
+	fakeAddr   netip.AddrPort // FakeIP:Port the client sent to — injected back as response src
 	lastActive atomic.Int64  // UnixNano; updated on every packet, read by cleanup goroutine
 }
 
@@ -142,14 +151,15 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 
 func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPort) {
 	log.V("[TUN UDP] HandleUDP: src=%s dst=%s payload_len=%d", src, dst, len(payload))
-	
+
 	// DNS interception: use FakeIP for instant response
 	if dst.Port() == 53 && h.fakeIPPool != nil {
 		h.handleDNSFakeIP(payload, src, dst)
 		return
 	}
 
-	// Reverse-lookup fake IP to domain for UDP endpoint
+	// Reverse-lookup fake IP to domain for UDP endpoint.
+	// dst is always a FakeIP in TUN mode (gVisor only sees IPs).
 	var endpoint transport.Endpoint
 	if h.fakeIPPool != nil {
 		unmapped := dst.Addr().Unmap()
@@ -162,48 +172,43 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 		endpoint = transport.Endpoint{Addr: dst}
 	}
 
-	// Get or Create UDP tunnel session for the source IP:Port (NAT binding)
-	// Use netip.AddrPort directly as map key (comparable value type, zero allocation)
-	val, ok := h.udpSessions.Load(src)
+	// Session key is (src, dst): each unique local-port → destination pair gets its
+	// own tunnel and fakeAddr. This is required for NAT detection tools that send
+	// from the same local port to multiple servers and expect per-server responses.
+	key := udpSessionKey{src: src, dst: dst}
+	val, ok := h.udpSessions.Load(key)
 	var session *udpSession
 
 	if !ok {
-		// Create a new tunnel connection for this local UDP port
 		tunnelConn, err := h.transport.Dial()
 		if err != nil {
-			log.Printf("[TUN UDP] Tunnel dial failed for %s: %v", src, err)
+			log.Printf("[TUN UDP] Tunnel dial failed for %s->%s: %v", src, dst, err)
 			return
 		}
 
 		session = &udpSession{
 			tunnelConn: tunnelConn,
-			remoteAddr: dst, // dst is always an IP (from gVisor), safe to store directly
-			fakeAddr:   dst, // Store the FakeIP destination for Full Cone NAT support
+			remoteAddr: dst,
+			fakeAddr:   dst, // response packets are injected back with this as src
 		}
 		session.lastActive.Store(time.Now().UnixNano())
 
-		actual, loaded := h.udpSessions.LoadOrStore(src, session)
+		actual, loaded := h.udpSessions.LoadOrStore(key, session)
 		if loaded {
-			// Another goroutine beat us to it, close the one we just made
 			tunnelConn.Close()
 			session = actual.(*udpSession)
 		} else {
-			log.V("[TUN UDP] New session binding: %s -> %s", src, dst)
+			log.V("[TUN UDP] New session: %s -> %s", src, dst)
 
-			// We only `ConnectUDP` once per pseudo-socket to trick Trojan
-			// into maintaining a pseudo-socket. The destination passed here
-			// is completely arbitrary since UDP mapping sends the actual target
-			// inside every WebSocket/transport packet frame anyway.
-			// We just arbitrarily use the First Packet's target.
 			if err := tunnelConn.ConnectUDP(endpoint, nil); err != nil {
 				log.Printf("[TUN UDP] ConnectUDP failed: %v", err)
 				tunnelConn.Close()
-				h.udpSessions.Delete(src)
+				h.udpSessions.Delete(key)
 				return
 			}
 
 			log.V("[TUN UDP] ConnectUDP success: endpoint=%v", endpoint)
-			go h.udpReadLoop(src, session)
+			go h.udpReadLoop(src, key, session)
 		}
 	} else {
 		session = val.(*udpSession)
@@ -211,23 +216,19 @@ func (h *Handler) HandleUDP(payload []byte, src netip.AddrPort, dst netip.AddrPo
 
 	session.lastActive.Store(time.Now().UnixNano())
 
-	// Forward UDP payload to the target via the proxy tunnel
 	log.V("[TUN UDP] Before WriteUDP: endpoint=%s payload_len=%d", endpoint, len(payload))
 	if err := session.tunnelConn.WriteUDP(endpoint, payload); err != nil {
 		log.Warn("[TUN UDP] WriteUDP failed for %s: %v (type: %T)", endpoint, err, err)
-		// Don't return - the session will continue to listen for responses
-		// If WriteUDP keeps failing, the session will eventually timeout
 		return
 	}
 	log.V("[TUN UDP] After WriteUDP success")
 }
 
-// udpReadLoop continuously reads UDP responses from the proxy tunnel and writes them back to the TUN Stack.
-func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) {
-	defer h.udpSessions.Delete(tunClientSrc)
+// udpReadLoop continuously reads UDP responses from the proxy tunnel and writes them back to the TUN stack.
+func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, key udpSessionKey, session *udpSession) {
+	defer h.udpSessions.Delete(key)
 	defer session.tunnelConn.Close()
 
-	// Eagerly release the cached write-side conn when the session ends.
 	if h.udpWriter != nil && session.remoteAddr.IsValid() {
 		defer h.udpWriter.ReleaseConn(session.remoteAddr, tunClientSrc)
 	}
@@ -241,7 +242,7 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 	for {
 		n, remoteAddr, err := session.tunnelConn.ReadUDPFrom(buf)
 		if err != nil {
-			log.V("[TUN UDP] Session read loop closed for %s: %v", tunClientSrc, err)
+			log.V("[TUN UDP] Session read loop closed for %s->%s: %v", tunClientSrc, key.dst, err)
 			return
 		}
 		log.V("[TUN UDP] Read response: remoteAddr=%s payloadLen=%d", remoteAddr, n)
@@ -250,36 +251,41 @@ func (h *Handler) udpReadLoop(tunClientSrc netip.AddrPort, session *udpSession) 
 			return
 		}
 
-		// Full Cone NAT Support: Use the FakeIP the app originally sent to.
-		// This is critical because:
-		// 1. Client sends to FakeIP (e.g., 198.18.0.1:53 for DNS)
-		// 2. App expects response from same FakeIP (NOT real server IP)
-		// 3. gVisor UDP socket validates source IP
-		// 4. Using FakeAddr ensures response passes gVisor's validation
+		// Determine the source address to inject into TUN.
 		//
-		// Without this, real server responses are DROPped by gVisor because
-		// the source IP doesn't match the expected FakeIP.
-		actualRemote := session.fakeAddr
-		if !actualRemote.IsValid() {
-			// Fallback to recorded remote (shouldn't happen in normal flow)
-			actualRemote = session.remoteAddr
-			if !actualRemote.IsValid() {
-				actualRemote = remoteAddr
+		// The server returns the real remote address in each response frame (remoteAddr).
+		// We must inject the response with a source IP that the client's gVisor socket
+		// will accept. In FakeIP mode the client sent to a FakeIP, so we must respond
+		// from that same FakeIP — not from the real server IP.
+		//
+		// Strategy:
+		//   1. Use remoteAddr to reverse-lookup the FakeIP pool. If the server echoes
+		//      back the real destination IP and we have a FakeIP for it, use that FakeIP.
+		//   2. Fall back to session.fakeAddr (the FakeIP the client originally sent to).
+		//      This is always correct for single-destination sessions.
+		injectSrc := session.fakeAddr
+		if h.fakeIPPool != nil && remoteAddr.IsValid() {
+			unmapped := remoteAddr.Addr().Unmap()
+			if domain, ok := h.fakeIPPool.LookupByIP(unmapped); ok {
+				// remoteAddr itself is a FakeIP — use it directly
+				injectSrc = remoteAddr
+				_ = domain
 			}
+			// remoteAddr is a real IP; the correct FakeIP to respond from is the
+			// one the client originally sent to (session.fakeAddr = key.dst), which
+			// is already set above.
 		}
 
-		// Inject reply into gVisor:
-		//   src = actualRemote  (packet appears to come FROM the FakeIP server)
-		//   dst = tunClientSrc   (packet is delivered TO the TUN client)
-		if actualRemote.IsValid() {
-			// Use InjectUDP instead of WriteTo to bypass gVisor's source address validation
-			// WriteTo would go through gonet.DialUDP which does additional source verification
-			// InjectUDP directly writes raw UDP packet to TUN, avoiding double validation
-			if err := h.udpWriter.InjectUDP(buf[:n], actualRemote, tunClientSrc); err != nil {
+		if !injectSrc.IsValid() {
+			injectSrc = remoteAddr
+		}
+
+		if injectSrc.IsValid() {
+			if err := h.udpWriter.InjectUDP(buf[:n], injectSrc, tunClientSrc); err != nil {
 				log.V("[TUN UDP] Inject to TUN failed: %v", err)
 			}
 		} else {
-			log.V("[TUN UDP] Dropping reply: no valid source address for session %s", tunClientSrc)
+			log.V("[TUN UDP] Dropping reply: no valid source address for session %s->%s", tunClientSrc, key.dst)
 		}
 	}
 }

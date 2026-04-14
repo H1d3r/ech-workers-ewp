@@ -38,10 +38,12 @@ const (
 
 // UDPPacket 表示一个 UDP 数据包
 type UDPPacket struct {
-	GlobalID [8]byte
-	Status   byte
-	Target   *net.UDPAddr
-	Payload  []byte
+	GlobalID   [8]byte
+	Status     byte
+	Target     *net.UDPAddr // 非 nil 表示 IP 类型目标
+	TargetHost string       // 非空表示域名类型目标（与 Target 互斥）
+	TargetPort uint16       // 域名类型时的端口
+	Payload    []byte
 }
 
 // UDPPacketAddr 表示一个 UDP 数据包 (零堆分配 netip.AddrPort 版本)
@@ -118,6 +120,15 @@ func EncodeUDPPacket(pkt *UDPPacket) ([]byte, error) {
 	return out, nil
 }
 
+// UDPPacketDomain 表示一个目标为域名的 UDP 数据包（TUN 模式 FakeIP 反查后使用）
+type UDPPacketDomain struct {
+	GlobalID [8]byte
+	Status   byte
+	Domain   string // 目标域名，非空时优先于 Target
+	Port     uint16
+	Payload  []byte
+}
+
 // EncodeUDPAddrPacket 编码 UDP 包为字节流
 func EncodeUDPAddrPacket(pkt *UDPPacketAddr) ([]byte, error) {
 	addrLen := 0
@@ -171,6 +182,46 @@ func EncodeUDPAddrPacket(pkt *UDPPacketAddr) ([]byte, error) {
 		copy(out[off:], pkt.Payload)
 	}
 
+	return out, nil
+}
+
+// EncodeUDPDomainPacket 编码目标为域名的 UDP 包为字节流。
+// 帧格式与 IP 版本相同，addrLen 字段含义扩展：
+//   type(1)=0x02 + domainLen(1) + domain(n) + port(2)
+func EncodeUDPDomainPacket(pkt *UDPPacketDomain) ([]byte, error) {
+	if len(pkt.Domain) == 0 {
+		return nil, errors.New("domain is empty")
+	}
+	if len(pkt.Domain) > 255 {
+		return nil, errors.New("domain too long")
+	}
+	// addrLen = type(1) + domainLen(1) + domain(n) + port(2)
+	addrLen := 1 + 1 + len(pkt.Domain) + 2
+	payloadLen := len(pkt.Payload)
+	frameLen := 8 + 1 + 1 + addrLen + 2 + payloadLen
+	totalLen := 2 + frameLen
+
+	out := make([]byte, totalLen)
+	binary.BigEndian.PutUint16(out[0:2], uint16(frameLen))
+	copy(out[2:10], pkt.GlobalID[:])
+	out[10] = pkt.Status
+	out[11] = byte(addrLen)
+
+	off := 12
+	out[off] = AddressTypeDomain
+	off++
+	out[off] = byte(len(pkt.Domain))
+	off++
+	copy(out[off:off+len(pkt.Domain)], pkt.Domain)
+	off += len(pkt.Domain)
+	binary.BigEndian.PutUint16(out[off:off+2], pkt.Port)
+	off += 2
+
+	binary.BigEndian.PutUint16(out[off:off+2], uint16(payloadLen))
+	off += 2
+	if payloadLen > 0 {
+		copy(out[off:], pkt.Payload)
+	}
 	return out, nil
 }
 
@@ -243,6 +294,23 @@ func DecodeUDPPacket(r io.Reader) (*UDPPacket, error) {
 			copy(ip, addrData[1:5])
 			port := binary.BigEndian.Uint16(addrData[5:7])
 			pkt.Target = &net.UDPAddr{IP: ip, Port: int(port)}
+
+		case AddressTypeDomain:
+			if len(addrData) < 2 {
+				if poolBufPtr != nil {
+					udpFramePool.Put(poolBufPtr)
+				}
+				return nil, errors.New("truncated domain length")
+			}
+			domainLen := int(addrData[1])
+			if len(addrData) < 2+domainLen+2 {
+				if poolBufPtr != nil {
+					udpFramePool.Put(poolBufPtr)
+				}
+				return nil, errors.New("truncated domain address")
+			}
+			pkt.TargetHost = string(addrData[2 : 2+domainLen])
+			pkt.TargetPort = binary.BigEndian.Uint16(addrData[2+domainLen : 2+domainLen+2])
 
 		case AddressTypeIPv6:
 			if len(addrData) < 19 {
@@ -470,6 +538,31 @@ func AppendUDPAddrFrame(buf []byte, globalID [8]byte, status byte, target netip.
 	}
 
 	// Append PayloadLen (2 bytes) + Payload
+	buf = append(buf, byte(payloadLen>>8), byte(payloadLen))
+	if payloadLen > 0 {
+		buf = append(buf, payload...)
+	}
+	return buf
+}
+
+// AppendUDPDomainFrame appends a complete EWP UDP frame with a domain target to buf.
+// Used when the destination is known by domain name (TUN mode FakeIP reverse-lookup).
+func AppendUDPDomainFrame(buf []byte, globalID [8]byte, status byte, domain string, port uint16, payload []byte) []byte {
+	// addrLen = type(1) + domainLen(1) + domain(n) + port(2)
+	addrLen := 1 + 1 + len(domain) + 2
+	payloadLen := len(payload)
+	frameLen := 8 + 1 + 1 + addrLen + 2 + payloadLen
+
+	buf = append(buf, byte(frameLen>>8), byte(frameLen))
+	buf = append(buf, globalID[:]...)
+	buf = append(buf, status)
+	buf = append(buf, byte(addrLen))
+
+	buf = append(buf, AddressTypeDomain)
+	buf = append(buf, byte(len(domain)))
+	buf = append(buf, domain...)
+	buf = append(buf, byte(port>>8), byte(port))
+
 	buf = append(buf, byte(payloadLen>>8), byte(payloadLen))
 	if payloadLen > 0 {
 		buf = append(buf, payload...)

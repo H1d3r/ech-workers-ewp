@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -318,26 +317,18 @@ func (c *StreamDownConn) WriteUDP(target transport.Endpoint, data []byte) error 
 		return c.Write(buf)
 	}
 
-	targetAddr := target.Addr
-	if target.Domain != "" && !targetAddr.IsValid() {
-		if ips, err := net.LookupIP(target.Domain); err == nil && len(ips) > 0 {
-			if ip4 := ips[0].To4(); ip4 != nil {
-				ip, _ := netip.AddrFromSlice(ip4)
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			} else {
-				ip, _ := netip.AddrFromSlice(ips[0].To16())
-				targetAddr = netip.AddrPortFrom(ip, target.Port)
-			}
-		}
+	if target.Domain != "" {
+		buf := make([]byte, 0, 2+8+1+1+(1+1+len(target.Domain)+2)+2+len(data))
+		buf = ewp.AppendUDPDomainFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Domain, target.Port, data)
+		return c.Write(buf)
 	}
 
 	addrLen := 7
-	if targetAddr.IsValid() && targetAddr.Addr().Is6() {
+	if target.Addr.IsValid() && target.Addr.Addr().Is6() {
 		addrLen = 19
 	}
-	totalCap := 2 + 8 + 1 + 1 + addrLen + 2 + len(data)
-	buf := make([]byte, 0, totalCap)
-	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, targetAddr, data)
+	buf := make([]byte, 0, 2+8+1+1+addrLen+2+len(data))
+	buf = ewp.AppendUDPAddrFrame(buf, c.udpGlobalID, ewp.UDPStatusKeep, target.Addr, data)
 	return c.Write(buf)
 }
 

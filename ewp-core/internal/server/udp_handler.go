@@ -175,10 +175,22 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 			return
 		}
 
-		// 确定目标地址：优先使用帧内地址，若缺失则用握手域名解析
+		// 确定目标地址，按优先级：
+		//   1. 帧内 IP 地址 (pkt.Target)
+		//   2. 帧内域名 (pkt.TargetHost) — 客户端在 TUN 模式下直接传域名，避免 FakeIP
+		//   3. 握手阶段的 handshakeTarget（兜底）
 		target := pkt.Target
+		if target == nil && pkt.TargetHost != "" {
+			ips, err := net.LookupIP(pkt.TargetHost)
+			if err != nil || len(ips) == 0 {
+				log.Warn("UDP resolve frame domain %q: %v", pkt.TargetHost, err)
+				h.remove(pkt.GlobalID)
+				return
+			}
+			target = &net.UDPAddr{IP: ips[0], Port: int(pkt.TargetPort)}
+			log.Debug("UDP resolved frame domain %q -> %s", pkt.TargetHost, target)
+		}
 		if target == nil && h.handshakeTarget != "" {
-			// 客户端发送了域名（非 IP），帧内无法携带域名，服务端自行解析
 			host, portStr, err := net.SplitHostPort(h.handshakeTarget)
 			if err != nil {
 				log.Warn("UDP parse handshake target %q: %v", h.handshakeTarget, err)
@@ -232,6 +244,14 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 	if pkt.Target != nil {
 		target = pkt.Target
 		s.initTarget = pkt.Target // 单 goroutine 写，安全
+	} else if pkt.TargetHost != "" {
+		// Keep 包携带域名 target，解析后更新
+		ips, err := net.LookupIP(pkt.TargetHost)
+		if err == nil && len(ips) > 0 {
+			resolved := &net.UDPAddr{IP: ips[0], Port: int(pkt.TargetPort)}
+			target = resolved
+			s.initTarget = resolved
+		}
 	}
 
 	// safeSend: 非阻塞投递，recover 防止 closeIdle/sessionWorker 并发关闭
