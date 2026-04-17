@@ -53,11 +53,6 @@ func NewDNSRouter(config DNSRouterConfig) *DefaultDNSRouter {
 		reverseMapping: config.ReverseMapping,
 	}
 
-	// Inject reverse mapping into tunnel resolver if both are set
-	if router.tunnelResolver != nil && router.reverseMapping != nil {
-		router.tunnelResolver.SetReverseMapping(router.reverseMapping)
-	}
-
 	return router
 }
 
