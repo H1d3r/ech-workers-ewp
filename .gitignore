@@ -1,9 +1,7 @@
 # Internal planning docs — never commit to public repo
+# UUID-prefixed files (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx-*.md)
 tickets/
-*.audit.md
-*_审计报告_*.md
-*_Security_Remediation_*.md
-*_Master_Tracker_*.md
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-*.md
 
 # .NET
 **/bin/
