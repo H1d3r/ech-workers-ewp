@@ -37,6 +37,12 @@ func NewServer(listenAddr string, trans transport.Transport, dnsServer string, u
 	return s
 }
 
+// P2-25: UpdateTransport updates the transport for hot reload
+// Existing connections continue to use old transport, new connections use new transport
+func (s *Server) UpdateTransport(trans transport.Transport) {
+	s.tunnelHandler.UpdateTransport(trans)
+}
+
 func (s *Server) Run() error {
 	listener, err := commonnet.ListenTFO("tcp", s.listenAddr)
 	if err != nil {

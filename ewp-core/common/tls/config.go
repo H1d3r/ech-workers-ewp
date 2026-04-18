@@ -34,12 +34,23 @@ type STDConfig struct {
 	config *tls.Config
 }
 
-func NewSTDConfig(serverName string, useMozillaCA bool, enablePQC bool) *STDConfig {
+func NewSTDConfig(serverName string, useMozillaCA bool, enablePQC bool) (*STDConfig, error) {
 	var roots *x509.CertPool
 	if useMozillaCA {
 		roots = GetMozillaCertPool()
 	} else {
-		roots, _ = x509.SystemCertPool()
+		// P1-9: SystemCertPool() errors must be checked. On some restricted
+		// systems (e.g. Android with user CAs disabled) it returns (nil, error).
+		// Ignoring the error could lead to nil RootCAs which may silently trust
+		// all certificates depending on Go version behavior.
+		var err error
+		roots, err = x509.SystemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load system CA pool: %w (consider enabling useMozillaCA)", err)
+		}
+		if roots == nil {
+			return nil, fmt.Errorf("system CA pool is nil (consider enabling useMozillaCA)")
+		}
 	}
 
 	tlsCfg := &tls.Config{
@@ -61,7 +72,7 @@ func NewSTDConfig(serverName string, useMozillaCA bool, enablePQC bool) *STDConf
 		}
 	}
 
-	return &STDConfig{config: tlsCfg}
+	return &STDConfig{config: tlsCfg}, nil
 }
 
 func (c *STDConfig) ServerName() string {
@@ -101,13 +112,16 @@ type STDECHConfig struct {
 	*STDConfig
 }
 
-func NewSTDECHConfig(serverName string, useMozillaCA bool, echList []byte, enablePQC bool) *STDECHConfig {
-	cfg := NewSTDConfig(serverName, useMozillaCA, enablePQC)
+func NewSTDECHConfig(serverName string, useMozillaCA bool, echList []byte, enablePQC bool) (*STDECHConfig, error) {
+	cfg, err := NewSTDConfig(serverName, useMozillaCA, enablePQC)
+	if err != nil {
+		return nil, err
+	}
 	cfg.config.EncryptedClientHelloConfigList = echList
 	cfg.config.EncryptedClientHelloRejectionVerify = func(cs tls.ConnectionState) error {
 		return errors.New("server rejected ECH")
 	}
-	return &STDECHConfig{cfg}
+	return &STDECHConfig{cfg}, nil
 }
 
 func (c *STDECHConfig) ECHConfigList() []byte {
@@ -127,8 +141,12 @@ func (c *STDECHConfig) Clone() Config {
 }
 
 // BuildWithECH is a convenience function for backward compatibility
+// P1-9: now returns error to propagate CA loading failures
 func BuildWithECH(serverName string, useMozillaCA bool, echList []byte, enablePQC bool) (*tls.Config, error) {
-	cfg := NewSTDECHConfig(serverName, useMozillaCA, echList, enablePQC)
+	cfg, err := NewSTDECHConfig(serverName, useMozillaCA, echList, enablePQC)
+	if err != nil {
+		return nil, err
+	}
 	return cfg.TLSConfig()
 }
 

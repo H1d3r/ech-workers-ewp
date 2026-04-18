@@ -10,6 +10,20 @@ import (
 	"time"
 )
 
+// ProtectError indicates that VpnService.protect() failed on Android.
+// P1-17: This error must be propagated to prevent routing loops where
+// unprotected sockets route back into the TUN device.
+type ProtectError struct {
+	Network string
+	Address string
+	FD      int
+}
+
+func (e *ProtectError) Error() string {
+	return fmt.Sprintf("VpnService.protect() failed for %s socket fd=%d to %s (routing loop risk)",
+		e.Network, e.FD, e.Address)
+}
+
 // Endpoint represents a target destination for a tunnel connection.
 // It can contain either an IP+Port (Addr) or Domain+Port (Domain+Port).
 type Endpoint struct {
@@ -171,12 +185,27 @@ func ParseAddress(addr string) (*ParsedAddress, error) {
 }
 
 // ParseUUID parses UUID string to [16]byte
+// Bug-A: Strict RFC 4122 format validation (8-4-4-4-12 with hyphens)
+// P2-23: Reject nil UUID (all zeros)
 func ParseUUID(s string) ([16]byte, error) {
 	var uuid [16]byte
+	
+	// Bug-A: Validate RFC 4122 format before removing hyphens
+	// Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars with hyphens)
+	if len(s) != 36 {
+		return uuid, fmt.Errorf("invalid UUID format: expected 36 characters, got %d", len(s))
+	}
+	
+	// Bug-A: Validate hyphen positions (8-4-4-4-12)
+	if s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return uuid, fmt.Errorf("invalid UUID format: hyphens must be at positions 8, 13, 18, 23")
+	}
+	
+	// Remove hyphens for hex decoding
 	s = strings.ReplaceAll(s, "-", "")
 
 	if len(s) != 32 {
-		return uuid, fmt.Errorf("invalid UUID length: %d", len(s))
+		return uuid, fmt.Errorf("invalid UUID length after removing hyphens: %d", len(s))
 	}
 
 	decoded, err := hex.DecodeString(s)
@@ -185,6 +214,19 @@ func ParseUUID(s string) ([16]byte, error) {
 	}
 
 	copy(uuid[:], decoded)
+	
+	// P2-23: Reject nil UUID (all zeros) - weak credential
+	isNil := true
+	for _, b := range uuid {
+		if b != 0 {
+			isNil = false
+			break
+		}
+	}
+	if isNil {
+		return uuid, fmt.Errorf("nil UUID (all zeros) is not allowed - weak credential")
+	}
+	
 	return uuid, nil
 }
 

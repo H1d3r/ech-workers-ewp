@@ -190,10 +190,11 @@ func (t *Transport) SetAuthority(authority string) *Transport {
 	return t
 }
 
-func (t *Transport) SetSNI(sni string) *Transport {
+// SetSNI sets the SNI override and reinitializes the client
+// P2-11: Return error to propagate reinit failures
+func (t *Transport) SetSNI(sni string) error {
 	t.sni = sni
-	t.reinitClient()
-	return t
+	return t.reinitClient()
 }
 
 // SetConcurrency sets the number of concurrent streams

@@ -32,7 +32,11 @@ func (h *EWPProtocolHandler) Handshake(data []byte, clientIP string) (*Handshake
 	}
 
 	if h.enableFlow && !result.IsUDP {
-		result.FlowState = ewp.NewFlowState(req.UUID[:])
+		// P2-40: Copy UUID slice to avoid cross-goroutine lifetime issues
+		// FlowState may outlive the handshake request, so we copy the UUID
+		// to ensure memory safety even though Go's GC would handle this correctly.
+		uuidCopy := append([]byte(nil), req.UUID[:]...)
+		result.FlowState = ewp.NewFlowState(uuidCopy)
 	}
 
 	return result, nil

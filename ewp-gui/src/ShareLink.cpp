@@ -40,9 +40,28 @@ EWPNode ShareLink::parseLink(const QString &link)
         return node;
     }
     
+    // P1-20: Strict validation - server address
+    QString server = url.host();
+    if (server.isEmpty()) {
+        return node;
+    }
+    
+    // P1-20: Strict validation - port range
+    int port = url.port(443);
+    if (port < 1 || port > 65535) {
+        return node;
+    }
+    
+    // P1-20: Strict validation - domain/host (ASCII/IDN safe characters)
+    // Allow alphanumeric, dots, hyphens, and IPv6 brackets
+    QRegularExpression domainRegex("^[a-zA-Z0-9.\\-\\[\\]:]+$");
+    if (!domainRegex.match(server).hasMatch()) {
+        return node;
+    }
+    
     // 服务器地址（实际连接目标）和端口
-    node.server = url.host();
-    node.serverPort = url.port(443);
+    node.server = server;
+    node.serverPort = port;
     
     // 解析节点名称
     node.name = url.fragment();
@@ -57,9 +76,19 @@ EWPNode ShareLink::parseLink(const QString &link)
     QString protocol = query.queryItemValue("protocol");
     if (protocol == "trojan") {
         node.appProtocol = EWPNode::TROJAN;
+        // P1-20: Trojan password - basic length check (non-empty, reasonable max)
+        if (credential.length() > 256) {
+            return node;
+        }
         node.trojanPassword = credential;
     } else {
         node.appProtocol = EWPNode::EWP;
+        // P1-20: Strict UUID validation (RFC 4122 format)
+        // UUID should be 36 chars: 8-4-4-4-12 with hyphens
+        QRegularExpression uuidRegex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+        if (!uuidRegex.match(credential).hasMatch()) {
+            return node;
+        }
         node.uuid = credential;
     }
     
@@ -78,22 +107,64 @@ EWPNode ShareLink::parseLink(const QString &link)
     // WebSocket 路径
     QString wsPath = query.queryItemValue("wsPath");
     if (!wsPath.isEmpty()) {
+        // P1-20: Path validation - must start with / and contain safe characters
+        if (!wsPath.startsWith("/") || wsPath.length() > 256) {
+            return node;
+        }
+        QRegularExpression pathRegex("^[a-zA-Z0-9/_\\-\\.]+$");
+        if (!pathRegex.match(wsPath).hasMatch()) {
+            return node;
+        }
         node.wsPath = wsPath;
     }
     
     // gRPC / H3gRPC 服务名
     QString grpcService = query.queryItemValue("grpcService");
     if (!grpcService.isEmpty()) {
+        // P1-20: Service name validation - alphanumeric and dots only
+        if (grpcService.length() > 128) {
+            return node;
+        }
+        QRegularExpression serviceRegex("^[a-zA-Z0-9\\.]+$");
+        if (!serviceRegex.match(grpcService).hasMatch()) {
+            return node;
+        }
         node.grpcServiceName = grpcService;
     }
     
-    node.host = query.queryItemValue("host");
+    QString hostHeader = query.queryItemValue("host");
+    if (!hostHeader.isEmpty()) {
+        // P1-20: Host header validation
+        if (hostHeader.length() > 256) {
+            return node;
+        }
+        QRegularExpression hostRegex("^[a-zA-Z0-9.\\-]+$");
+        if (!hostRegex.match(hostHeader).hasMatch()) {
+            return node;
+        }
+        node.host = hostHeader;
+    }
 
     // TLS 配置
     node.enableTLS = query.queryItemValue("tls") != "0";
-    node.sni = query.queryItemValue("sni");
+    QString sni = query.queryItemValue("sni");
+    if (!sni.isEmpty()) {
+        // P1-20: SNI validation
+        if (sni.length() > 256) {
+            return node;
+        }
+        QRegularExpression sniRegex("^[a-zA-Z0-9.\\-]+$");
+        if (!sniRegex.match(sni).hasMatch()) {
+            return node;
+        }
+        node.sni = sni;
+    }
     QString tlsVer = query.queryItemValue("tlsVer");
     if (!tlsVer.isEmpty()) {
+        // P1-20: TLS version validation
+        if (tlsVer != "1.2" && tlsVer != "1.3") {
+            return node;
+        }
         node.minTLSVersion = tlsVer;
     }
 
@@ -101,10 +172,27 @@ EWPNode ShareLink::parseLink(const QString &link)
     node.enableECH = query.queryItemValue("ech") == "1";
     QString echDomain = query.queryItemValue("echDomain");
     if (!echDomain.isEmpty()) {
+        // P1-20: ECH domain validation
+        if (echDomain.length() > 256) {
+            return node;
+        }
+        QRegularExpression echRegex("^[a-zA-Z0-9.\\-]+$");
+        if (!echRegex.match(echDomain).hasMatch()) {
+            return node;
+        }
         node.echDomain = echDomain;
     }
     QString dnsServer = query.queryItemValue("dns");
     if (!dnsServer.isEmpty()) {
+        // P1-20: DNS server validation (domain or URL)
+        if (dnsServer.length() > 512) {
+            return node;
+        }
+        // Allow alphanumeric, dots, hyphens, slashes, colons for DoH URLs
+        QRegularExpression dnsRegex("^[a-zA-Z0-9.\\-/:]+$");
+        if (!dnsRegex.match(dnsServer).hasMatch()) {
+            return node;
+        }
         node.dnsServer = dnsServer;
     }
     
@@ -115,10 +203,23 @@ EWPNode ShareLink::parseLink(const QString &link)
     // XHTTP 配置
     QString xhttpMode = query.queryItemValue("xhttpMode");
     if (!xhttpMode.isEmpty()) {
+        // P1-20: XHTTP mode validation
+        if (xhttpMode != "auto" && xhttpMode != "stream-up" && 
+            xhttpMode != "stream-down" && xhttpMode != "stream-one") {
+            return node;
+        }
         node.xhttpMode = xhttpMode;
     }
     QString xhttpPath = query.queryItemValue("xhttpPath");
     if (!xhttpPath.isEmpty()) {
+        // P1-20: XHTTP path validation
+        if (!xhttpPath.startsWith("/") || xhttpPath.length() > 256) {
+            return node;
+        }
+        QRegularExpression xpathRegex("^[a-zA-Z0-9/_\\-\\.]+$");
+        if (!xpathRegex.match(xhttpPath).hasMatch()) {
+            return node;
+        }
         node.xhttpPath = xhttpPath;
     }
     
@@ -194,7 +295,7 @@ QString ShareLink::generateLink(const EWPNode &node)
     if (node.enableECH && node.echDomain != "cloudflare-ech.com") {
         query.addQueryItem("echDomain", node.echDomain);
     }
-    if (node.enableECH && node.dnsServer != "dns.alidns.com/dns-query") {
+    if (node.enableECH && node.dnsServer != "223.5.5.5/dns-query") {
         query.addQueryItem("dns", node.dnsServer);
     }
     

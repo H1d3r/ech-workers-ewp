@@ -5,9 +5,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	commontls "ewp-core/common/tls"
+	"ewp-core/constant"
 	"ewp-core/log"
 	"ewp-core/option"
 	"ewp-core/protocol"
@@ -21,6 +25,15 @@ import (
 	"ewp-core/tun/util"
 )
 
+// P2-25: Global state for hot reload
+var (
+	currentServer   atomic.Value // stores *protocol.Server
+	currentTransport atomic.Value // stores transport.Transport
+	currentECHMgr   atomic.Value // stores *commontls.ECHManager
+	reloadMutex     sync.Mutex
+	configPath      string
+)
+
 func main() {
 	// Load configuration (will parse flags internally)
 	cfg, err := option.LoadConfigWithFallback()
@@ -29,6 +42,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: %s -c config.json\n", os.Args[0])
 		os.Exit(1)
 	}
+
+	// P2-25: Save config path for hot reload
+	configPath = option.GetConfigPath()
 
 	// Setup logging
 	setupLogging(cfg)
@@ -45,8 +61,8 @@ func main() {
 	log.Info("Outbound: tag=%s, type=%s, server=%s:%d",
 		outbound.Tag, outbound.Type, outbound.Server, outbound.ServerPort)
 
-	// Create transport (and get echMgr for TUN bypass injection)
-	trans, echMgr, err := createTransport(outbound, cfg)
+	// Create transport (and get echMgr and dohServers for TUN bypass injection)
+	trans, echMgr, dohServers, err := createTransport(outbound, cfg)
 	if err != nil {
 		log.Fatalf("Failed to create transport: %v", err)
 	}
@@ -59,10 +75,16 @@ func main() {
 	inbound := cfg.Inbounds[0]
 	log.Info("Inbound: tag=%s, type=%s", inbound.Tag, inbound.Type)
 
+	// P2-25: Setup SIGHUP handler for hot reload (proxy mode only)
+	// TUN mode doesn't support hot reload due to network interface complexity
+	if inbound.Type != "tun" {
+		setupSIGHUPHandler()
+	}
+
 	// Start based on inbound type
 	switch inbound.Type {
 	case "tun":
-		startTunMode(inbound, trans, echMgr, cfg)
+		startTunMode(inbound, trans, echMgr, dohServers, cfg)
 	case "mixed", "socks", "http":
 		startProxyMode(inbound, trans, cfg)
 	default:
@@ -76,10 +98,10 @@ type bypassDialerProvider interface {
 	BypassDialer() *net.Dialer
 }
 
-func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (transport.Transport, *commontls.ECHManager, error) {
+func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (transport.Transport, *commontls.ECHManager, []string, error) {
 	// Validate outbound
 	if outbound.Type != "ewp" && outbound.Type != "trojan" {
-		return nil, nil, fmt.Errorf("unsupported outbound type: %s", outbound.Type)
+		return nil, nil, nil, fmt.Errorf("unsupported outbound type: %s", outbound.Type)
 	}
 
 	// Determine server address
@@ -99,22 +121,31 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 
 	// Initialize ECH manager
 	var echMgr *commontls.ECHManager
+	var dohServers []string // DoH servers for both ECH and BypassResolver
 	useECH := outbound.TLS != nil && outbound.TLS.ECH != nil && outbound.TLS.ECH.Enabled
 
 	if useECH {
 		echDomain := outbound.TLS.ECH.ConfigDomain
-		dohServer := outbound.TLS.ECH.DOHServer
+		dohServers = outbound.TLS.ECH.DOHServers // P0-12: multiple servers
+		strictMode := !outbound.TLS.ECH.FallbackOnError // P0-12: strict mode
 
 		if echDomain == "" {
 			echDomain = "cloudflare-ech.com"
 		}
-		if dohServer == "" {
-			// Use IP address to avoid DNS dependency (Alibaba Cloud DNS)
-			dohServer = "https://223.5.5.5/dns-query"
+		
+		// P0-12: backward compatibility - if DOHServers is empty but DOHServer is set, use it
+		if len(dohServers) == 0 && outbound.TLS.ECH.DOHServer != "" {
+			dohServers = []string{outbound.TLS.ECH.DOHServer}
+		}
+		
+		if len(dohServers) == 0 {
+			// P0-12: use multiple default servers for redundancy
+			dohServers = constant.DefaultDNSServers
 		}
 
-		log.Info("ECH: initializing (domain: %s, DoH: %s)", echDomain, dohServer)
-		echMgr = commontls.NewECHManager(echDomain, dohServer)
+		log.Info("ECH: initializing (domain: %s, DoH servers: %v, strict: %v)", 
+			echDomain, dohServers, strictMode)
+		echMgr = commontls.NewECHManagerWithTTL(echDomain, 1*time.Hour, strictMode, dohServers...)
 
 		if err := echMgr.Refresh(); err != nil {
 			if outbound.TLS.ECH.FallbackOnError {
@@ -122,14 +153,17 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 				useECH = false
 				echMgr = nil
 			} else {
-				return nil, nil, fmt.Errorf("ECH initialization failed: %w", err)
+				return nil, nil, nil, fmt.Errorf("ECH initialization failed: %w", err)
 			}
 		}
+	} else {
+		// Even without ECH, use default DoH servers for BypassResolver
+		dohServers = constant.DefaultDNSServers
 	}
 
 	// Get transport config
 	if outbound.Transport == nil {
-		return nil, nil, fmt.Errorf("transport configuration is required")
+		return nil, nil, nil, fmt.Errorf("transport configuration is required")
 	}
 
 	transportType := outbound.Transport.Type
@@ -156,7 +190,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			path, echMgr,
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 	case "grpc":
@@ -170,7 +204,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			serviceName, echMgr,
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		if outbound.Transport.UserAgent != "" {
@@ -189,7 +223,7 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			serviceName, echMgr,
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		if outbound.Transport.UserAgent != "" {
@@ -211,11 +245,11 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 			path, echMgr,
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 	default:
-		return nil, nil, fmt.Errorf("unsupported transport type: %s", transportType)
+		return nil, nil, nil, fmt.Errorf("unsupported transport type: %s", transportType)
 	}
 
 	// Apply Host override (HTTP Host header / gRPC authority)
@@ -247,17 +281,20 @@ func createTransport(outbound option.OutboundConfig, cfg *option.RootConfig) (tr
 		case *grpc.Transport:
 			t.SetSNI(effectiveSNI)
 		case *h3grpc.Transport:
-			t.SetSNI(effectiveSNI)
+			// P2-11: h3grpc SetSNI now returns error
+			if err := t.SetSNI(effectiveSNI); err != nil {
+				return nil, nil, nil, fmt.Errorf("failed to set SNI: %w", err)
+			}
 		case *xhttp.Transport:
 			t.SetSNI(effectiveSNI)
 		}
 	}
 
 	log.Info("Transport created: %s", trans.Name())
-	return trans, echMgr, nil
+	return trans, echMgr, dohServers, nil
 }
 
-func startTunMode(inbound option.InboundConfig, trans transport.Transport, echMgr *commontls.ECHManager, cfg *option.RootConfig) {
+func startTunMode(inbound option.InboundConfig, trans transport.Transport, echMgr *commontls.ECHManager, dohServers []string, cfg *option.RootConfig) {
 	log.Info("Starting TUN mode...")
 
 	if !util.IsAdmin() {
@@ -297,15 +334,16 @@ func startTunMode(inbound option.InboundConfig, trans transport.Transport, echMg
 	log.Info("TUN DNS: IPv4=%s, IPv6=%s", dnsServer, dns6Server)
 
 	tunCfg := &tun.Config{
-		IP:              tunIP,
-		DNS:             dnsServer,
-		IPv6:            tunIPv6,
-		IPv6DNS:         dns6Server,
-		MTU:             mtu,
-		Stack:           inbound.Stack,
-		Transport:       trans,
-		ServerAddr:      cfg.Outbounds[0].Server,
-		TunnelDoHServer: inbound.TunnelDoHServer,
+		IP:               tunIP,
+		DNS:              dnsServer,
+		IPv6:             tunIPv6,
+		IPv6DNS:          dns6Server,
+		MTU:              mtu,
+		Stack:            inbound.Stack,
+		Transport:        trans,
+		ServerAddr:       cfg.Outbounds[0].Server,
+		TunnelDoHServer:  inbound.TunnelDoHServer,
+		BypassDoHServers: dohServers, // Use same DoH servers as ECH config
 	}
 
 	tunDev, err := tun.New(tunCfg)
@@ -381,6 +419,9 @@ func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg
 		log.Info("SOCKS5 auth enabled (%d user(s))", len(users))
 	}
 
+	// P2-25: Store transport for hot reload
+	currentTransport.Store(trans)
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -390,6 +431,10 @@ func startProxyMode(inbound option.InboundConfig, trans transport.Transport, cfg
 	}()
 
 	server := protocol.NewServer(listenAddr, trans, dnsServer, users, inbound.MaxConnections)
+	
+	// P2-25: Store server for hot reload
+	currentServer.Store(server)
+	
 	log.Fatalf("Proxy server stopped: %v", server.Run())
 }
 
@@ -407,4 +452,96 @@ func setupLogging(cfg *option.RootConfig) {
 		}
 		log.SetMultiOutput(os.Stdout, f)
 	}
+}
+
+// P2-25: Setup SIGHUP handler for configuration hot reload
+func setupSIGHUPHandler() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGHUP)
+	
+	go func() {
+		for range sigChan {
+			log.Info("[RELOAD] Received SIGHUP signal, reloading configuration...")
+			if err := reloadConfig(); err != nil {
+				log.Warn("[RELOAD] Configuration reload failed: %v", err)
+			} else {
+				log.Info("[RELOAD] Configuration reloaded successfully")
+			}
+		}
+	}()
+	
+	log.Info("[RELOAD] SIGHUP handler installed (send SIGHUP to reload config)")
+}
+
+// P2-25: Reload configuration and recreate transport
+// Existing connections continue to use old transport, new connections use new transport
+func reloadConfig() error {
+	reloadMutex.Lock()
+	defer reloadMutex.Unlock()
+	
+	// Load new configuration
+	cfg, err := option.LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	
+	// Validate configuration
+	if len(cfg.Outbounds) == 0 {
+		return fmt.Errorf("no outbound configured")
+	}
+	if len(cfg.Inbounds) == 0 {
+		return fmt.Errorf("no inbound configured")
+	}
+	
+	outbound := cfg.Outbounds[0]
+	inbound := cfg.Inbounds[0]
+	
+	// TUN mode doesn't support hot reload
+	if inbound.Type == "tun" {
+		return fmt.Errorf("TUN mode does not support hot reload")
+	}
+	
+	log.Info("[RELOAD] Creating new transport: %s → %s:%d", 
+		outbound.Type, outbound.Server, outbound.ServerPort)
+	
+	// Create new transport
+	newTrans, newECHMgr, _, err := createTransport(outbound, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create transport: %w", err)
+	}
+	
+	// Get old transport and ECH manager for cleanup
+	_, _ = currentTransport.Load().(transport.Transport)
+	oldECHMgr, _ := currentECHMgr.Load().(*commontls.ECHManager)
+	
+	// Store new transport and ECH manager
+	currentTransport.Store(newTrans)
+	currentECHMgr.Store(newECHMgr)
+	
+	// Get current server and update its transport
+	if srv, ok := currentServer.Load().(*protocol.Server); ok {
+		srv.UpdateTransport(newTrans)
+		log.Info("[RELOAD] Server transport updated")
+	}
+	
+	// Cleanup old resources after a grace period
+	// Give existing connections time to complete
+	go func() {
+		time.Sleep(30 * time.Second)
+		
+		if oldECHMgr != nil {
+			// P1-6: Stop ECH manager to release resources
+			oldECHMgr.Stop()
+			log.Info("[RELOAD] Old ECH manager stopped")
+		}
+		
+		// Note: We don't close oldTrans here because existing connections may still be using it
+		// The transport will be garbage collected when all connections are closed
+		log.Info("[RELOAD] Old transport cleanup scheduled")
+	}()
+	
+	// Update logging if changed
+	setupLogging(cfg)
+	
+	return nil
 }

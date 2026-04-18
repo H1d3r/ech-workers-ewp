@@ -28,6 +28,13 @@ const maxXHTTPHandshakeSize = 4 * 1024 // 4 KB
 // 1 MB gives a comfortable margin while preventing OOM via crafted large bodies.
 const maxXHTTPFrameSize = 1 * 1024 * 1024 // 1 MB
 
+// P2-20: XHTTP StreamOne header size constants for maintainability
+// trojanStreamOneHeaderSize = KeyLength(56) + CRLF(2) + Command(1) + AddressType(1) + Port(2) + CRLF(2)
+const trojanStreamOneHeaderSize = trojan.KeyLength + 2 + 1 + 1 + 2 + 2 // 64 bytes
+
+// ewpStreamOneHeaderSize = Version(1) + Command(1) + Nonce(16) + AddressType(1) + Port(2) + PlaintextLen(2)
+const ewpStreamOneHeaderSize = 1 + 1 + 16 + 1 + 2 + 2 // 23 bytes (but we read 15 first, then calculate total)
+
 // maxXHTTPSessionsTotal is the server-wide cap on concurrent XHTTP sessions.
 // An authenticated user creating unlimited sessions (each holding a goroutine +
 // remote socket + upload queue) can exhaust file descriptors and OOM the server.
@@ -42,6 +49,11 @@ type xhttpSession struct {
 	closeOnce        sync.Once
 	createdAt        time.Time
 	clientIP         string
+	// P2-19: Condition variable to signal when remote connection is ready
+	// Replaces 50ms polling with efficient wait/signal mechanism
+	mu               sync.Mutex
+	cond             *sync.Cond
+	remoteReady      bool
 }
 
 var (
@@ -170,6 +182,8 @@ func upsertSession(sessionID string, clientIP string) *xhttpSession {
 		createdAt:        time.Now(),
 		clientIP:         clientIP,
 	}
+	// P2-19: Initialize condition variable for efficient wait/signal
+	session.cond = sync.NewCond(&session.mu)
 	xhttpSessions.Store(sessionID, session)
 
 	shouldReap := make(chan struct{})
@@ -220,7 +234,8 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 
 	var handshakeData []byte
 	if trojanMode {
-		header := make([]byte, trojan.KeyLength+2+1+1+2+2)
+		// P2-20: Use named constant instead of magic number
+		header := make([]byte, trojanStreamOneHeaderSize)
 		if _, err := io.ReadFull(r.Body, header); err != nil {
 			httpError(w, http.StatusBadRequest, "Bad Request", "XHTTP stream-one: Failed to read Trojan header: %v", err)
 			return
@@ -306,6 +321,9 @@ func xhttpStreamOneHandler(w http.ResponseWriter, r *http.Request) {
 
 func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
 	clientIP := getClientIP(r)
+	
+	// Bug-C: Record start time for uniform response timing
+	startTime := time.Now()
 
 	handshakeData, err := io.ReadAll(io.LimitReader(r.Body, maxXHTTPHandshakeSize+1))
 	if err != nil {
@@ -321,6 +339,15 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 	req, respData, err := server.HandleEWPHandshakeBinary(handshakeData, clientIP)
 	if err != nil {
 		log.Warn("XHTTP handshake: EWP failed: %v", err)
+		
+		// Bug-C: Add uniform delay for fake responses to match real response timing
+		// This prevents DPI from distinguishing real vs fake based on response time
+		minResponseTime := 50 * time.Millisecond // Simulate minimum dial latency
+		elapsed := time.Since(startTime)
+		if elapsed < minResponseTime {
+			time.Sleep(minResponseTime - elapsed)
+		}
+		
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write(respData)
 		return
@@ -331,6 +358,12 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 	session := upsertSession(sessionID, clientIP)
 	if session == nil {
 		// P0-7: session cap exceeded — reject with 503 so the client can retry later
+		// Bug-C: Also add delay for consistency
+		minResponseTime := 50 * time.Millisecond
+		elapsed := time.Since(startTime)
+		if elapsed < minResponseTime {
+			time.Sleep(minResponseTime - elapsed)
+		}
 		http.Error(w, "Service Unavailable: session limit reached", http.StatusServiceUnavailable)
 		return
 	}
@@ -347,11 +380,18 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 		if ctx.Err() == context.Canceled {
 			return
 		}
+		// Bug-C: Dial failure timing is naturally slower, no need to add delay
 		http.Error(w, "Connection failed", http.StatusBadGateway)
 		return
 	}
 
+	// P2-19: Signal that remote connection is ready
+	session.mu.Lock()
 	session.remote = remote
+	session.remoteReady = true
+	session.cond.Broadcast() // Wake up waiting download handlers
+	session.mu.Unlock()
+	
 	log.Info("XHTTP session connected: %s -> %s", sessionID, target)
 
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -361,23 +401,49 @@ func xhttpHandshakeHandler(w http.ResponseWriter, r *http.Request, sessionID str
 
 func xhttpDownloadHandler(w http.ResponseWriter, r *http.Request, sessionID string) {
 	var session *xhttpSession
+	
+	// P2-19: Use condition variable instead of polling
+	// Wait up to 15 seconds for session to be ready
 	deadline := time.Now().Add(15 * time.Second)
+	
+	// First, find the session
 	for time.Now().Before(deadline) {
 		val, ok := xhttpSessions.Load(sessionID)
 		if ok {
 			session = val.(*xhttpSession)
-			if session.remote != nil {
-				break
-			}
+			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // Brief sleep to find session
 	}
 
 	if session == nil {
 		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
-	if session.remote == nil {
+
+	// P2-19: Wait for remote connection using condition variable
+	session.mu.Lock()
+	for !session.remoteReady && time.Now().Before(deadline) {
+		// Wait with timeout
+		done := make(chan struct{})
+		go func() {
+			session.cond.Wait()
+			close(done)
+		}()
+		
+		session.mu.Unlock()
+		
+		select {
+		case <-done:
+			session.mu.Lock()
+		case <-time.After(time.Until(deadline)):
+			session.mu.Lock()
+		}
+	}
+	ready := session.remoteReady
+	session.mu.Unlock()
+
+	if !ready || session.remote == nil {
 		http.Error(w, "Session not ready (target connection timeout)", http.StatusGatewayTimeout)
 		return
 	}

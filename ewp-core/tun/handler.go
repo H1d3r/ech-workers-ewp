@@ -107,6 +107,10 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 
 	log.V("[TUN TCP] Connected: %s", target)
 
+	// P2-16: Set idle timeout to prevent half-open connections from leaking file descriptors
+	// Default 5 minutes - long enough for SSH/WebSocket but prevents indefinite hangs
+	const idleTimeout = 5 * time.Minute
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -115,6 +119,8 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 		b := commpool.GetLarge()
 		defer commpool.PutLarge(b)
 		for {
+			// P2-16: Set read deadline before each read
+			conn.SetReadDeadline(time.Now().Add(idleTimeout))
 			n, err := conn.Read(b)
 			if err != nil {
 				tunnelConn.Close()
@@ -137,6 +143,8 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 				conn.Close()
 				return
 			}
+			// P2-16: Refresh deadline on successful write (activity detected)
+			conn.SetReadDeadline(time.Now().Add(idleTimeout))
 			if _, err := conn.Write(b[:n]); err != nil {
 				tunnelConn.Close()
 				return

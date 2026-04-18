@@ -67,13 +67,21 @@ const (
 )
 
 func NewHandshakeRequest(uuid [16]byte, command byte, addr Address) *HandshakeRequest {
-	// 使用 crypto/rand 生成随机 Version (1-255)
-	versionBig, _ := rand.Int(rand.Reader, big.NewInt(255))
+	// P1-26: crypto/rand errors must be checked - failure means non-random data
+	// which breaks cryptographic security. Panic is appropriate here as this
+	// indicates a system-level failure (entropy exhaustion, fork without reseed).
+	versionBig, err := rand.Int(rand.Reader, big.NewInt(255))
+	if err != nil {
+		panic(fmt.Sprintf("crypto/rand.Int failed: %v - system entropy exhausted", err))
+	}
 	version := byte(versionBig.Int64() + 1)
 
-	// 使用 crypto/rand 生成随机 Padding 长度
+	// P1-26: check padding length randomness
 	paddingRange := MaxPaddingLength - MinPaddingLength + 1
-	paddingBig, _ := rand.Int(rand.Reader, big.NewInt(int64(paddingRange)))
+	paddingBig, err := rand.Int(rand.Reader, big.NewInt(int64(paddingRange)))
+	if err != nil {
+		panic(fmt.Sprintf("crypto/rand.Int failed: %v - system entropy exhausted", err))
+	}
 	paddingLen := byte(paddingBig.Int64() + MinPaddingLength)
 
 	req := &HandshakeRequest{
@@ -85,7 +93,10 @@ func NewHandshakeRequest(uuid [16]byte, command byte, addr Address) *HandshakeRe
 		Options:       0,
 		PaddingLength: paddingLen,
 	}
-	rand.Read(req.Nonce[:])
+	// P1-26: nonce randomness is critical for AEAD security
+	if _, err := rand.Read(req.Nonce[:]); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v - system entropy exhausted", err))
+	}
 	return req
 }
 
@@ -124,8 +135,10 @@ func (r *HandshakeRequest) Encode() ([]byte, error) {
 	buf[offset] = r.PaddingLength
 	offset++
 
-	// 填充随机 Padding
-	rand.Read(buf[offset : offset+int(r.PaddingLength)])
+	// 填充随机 Padding (P1-26: check error)
+	if _, err := rand.Read(buf[offset : offset+int(r.PaddingLength)]); err != nil {
+		return nil, fmt.Errorf("crypto/rand.Read failed: %w", err)
+	}
 	offset += int(r.PaddingLength)
 
 	// === 3. 加密 (ChaCha20-Poly1305) ===
@@ -282,9 +295,48 @@ func NewSuccessResponse(version byte, nonce [12]byte) *HandshakeResponse {
 }
 
 func GenerateFakeResponse() []byte {
-	fake := make([]byte, 26)
-	rand.Read(fake)
-	return fake
+	// P1-29: Make fake response structurally similar to real response to resist
+	// statistical analysis. Real response has: VersionEcho(1) + Status(1) + 
+	// ServerTime(4) + NonceEcho(12) + AuthTag(8) = 26 bytes
+	buf := make([]byte, 26)
+	
+	// P1-29: Generate structured fake response matching real response layout
+	// VersionEcho: random non-zero version (1 byte)
+	versionBig, err := rand.Int(rand.Reader, big.NewInt(255))
+	if err != nil {
+		panic(fmt.Sprintf("crypto/rand.Int failed: %v - cannot generate secure fake response", err))
+	}
+	buf[0] = byte(versionBig.Int64() + 1) // non-zero version
+	
+	// Status: use invalid status code (not 0x00 or 0x01) to indicate rejection
+	// but still look structured (1 byte)
+	statusBig, err := rand.Int(rand.Reader, big.NewInt(254))
+	if err != nil {
+		panic(fmt.Sprintf("crypto/rand.Int failed: %v - cannot generate secure fake response", err))
+	}
+	buf[1] = byte(statusBig.Int64() + 2) // 0x02-0xFF (avoid 0x00=OK, 0x01=Error)
+	
+	// ServerTime: use realistic timestamp with random offset (4 bytes)
+	// This makes the fake response look like a real rejection at a plausible time
+	now := uint32(time.Now().Unix())
+	offsetBig, err := rand.Int(rand.Reader, big.NewInt(3600)) // ±1 hour random offset
+	if err != nil {
+		panic(fmt.Sprintf("crypto/rand.Int failed: %v - cannot generate secure fake response", err))
+	}
+	offset := uint32(offsetBig.Int64()) - 1800 // -30min to +30min
+	binary.BigEndian.PutUint32(buf[2:6], now+offset)
+	
+	// NonceEcho: random 12 bytes (looks like echoed nonce)
+	if _, err := rand.Read(buf[6:18]); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v - cannot generate secure fake response", err))
+	}
+	
+	// AuthTag: random 8 bytes (looks like HMAC tag)
+	if _, err := rand.Read(buf[18:26]); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v - cannot generate secure fake response", err))
+	}
+	
+	return buf
 }
 
 func deriveEncryptionKey(uuid [16]byte, nonce [12]byte) []byte {

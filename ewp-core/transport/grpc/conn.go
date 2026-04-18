@@ -1,6 +1,7 @@
 ﻿package grpc
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -31,9 +32,11 @@ type Conn struct {
 	writeOnceUserUUID []byte
 	udpGlobalID       [8]byte
 	leftover          []byte
+	ctx               context.Context    // P2-13: Context for stream cancellation
+	cancel            context.CancelFunc // P2-13: Cancel func to unblock RecvMsg
 }
 
-func NewConn(conn *grpc.ClientConn, stream grpc.ClientStream, uuid [16]byte, password string, enableFlow, useTrojan bool) *Conn {
+func NewConn(conn *grpc.ClientConn, stream grpc.ClientStream, uuid [16]byte, password string, enableFlow, useTrojan bool, ctx context.Context, cancel context.CancelFunc) *Conn {
 	c := &Conn{
 		conn:       conn,
 		stream:     stream,
@@ -41,6 +44,8 @@ func NewConn(conn *grpc.ClientConn, stream grpc.ClientStream, uuid [16]byte, pas
 		password:   password,
 		enableFlow: enableFlow,
 		useTrojan:  useTrojan,
+		ctx:        ctx,    // P2-13: Store context for cancellation
+		cancel:     cancel, // P2-13: Store cancel func
 	}
 	if useTrojan {
 		c.key = trojan.GenerateKey(password)
@@ -513,13 +518,23 @@ func (c *Conn) Write(data []byte) error {
 	return err
 }
 
+// Close closes the connection and cancels the stream context
+// P2-13: Cancel context to ensure RecvMsg goroutine exits
 func (c *Conn) Close() error {
+	// P2-13: Cancel context first to unblock RecvMsg
+	if c.cancel != nil {
+		c.cancel()
+	}
 	if c.stream != nil {
 		c.stream.CloseSend()
 	}
 	return nil
 }
 
+// StartPing implements the TunnelConn interface but is a no-op for gRPC.
+// P2-12: gRPC connections rely on HTTP/2 PING frames and keepalive settings
+// configured via SetKeepalive() rather than application-level pings.
+// The returned channel is never closed and serves only to satisfy the interface.
 func (c *Conn) StartPing(interval time.Duration) chan struct{} {
 	stopChan := make(chan struct{})
 	return stopChan

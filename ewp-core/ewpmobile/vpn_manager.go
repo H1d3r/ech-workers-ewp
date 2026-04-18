@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ewp-core/common/tls"
+	"ewp-core/constant"
 	"ewp-core/dns"
 	"ewp-core/log"
 	"ewp-core/transport"
@@ -62,6 +63,9 @@ type vpnManager struct {
 	// ECH manager — must be stopped on Stop() to avoid goroutine leak (P1-6)
 	echMgr *tls.ECHManager
 
+	// DoH servers for bypass resolver (from ech.doh_servers config)
+	dnsServers []string
+
 	// TUN 相关
 	tunFD      int
 	tunMTU     int
@@ -110,7 +114,8 @@ type VPNConfig struct {
 	EnableFlow bool
 	EnablePQC  bool
 	ECHDomain  string
-	DNSServer  string
+	DNSServer  string   // Deprecated: use DNSServers instead (P0-12)
+	DNSServers []string // P0-12: multiple DoH servers for redundancy
 
 	// TUN 配置
 	TunIP      string
@@ -162,16 +167,27 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 		if echDomain == "" {
 			echDomain = "cloudflare-ech.com"
 		}
-		dnsServer := config.DNSServer
-		if dnsServer == "" {
-			dnsServer = "https://223.5.5.5/dns-query"
-		} else if !strings.HasPrefix(dnsServer, "https://") && !strings.HasPrefix(dnsServer, "http://") {
-			dnsServer = "https://" + dnsServer
+		
+		// P0-12: use multiple DoH servers for redundancy
+		dnsServers := config.DNSServers
+		if len(dnsServers) == 0 {
+			// Fallback to single server config if provided
+			if config.DNSServer != "" {
+				dnsServer := config.DNSServer
+				if !strings.HasPrefix(dnsServer, "https://") && !strings.HasPrefix(dnsServer, "http://") {
+					dnsServer = "https://" + dnsServer
+				}
+				dnsServers = []string{dnsServer}
+			} else {
+				// Use defaults from constant package
+				dnsServers = constant.DefaultDNSServers
+			}
 		}
 
-		echMgr = tls.NewECHManager(echDomain, dnsServer)
+		// P0-12: strict mode = false for mobile (allow fallback to expired cache)
+		echMgr = tls.NewECHManagerWithTTL(echDomain, 1*time.Hour, false, dnsServers...)
 		if IsSocketProtectorSet() {
-			echMgr.SetBypassDialer(makeProtectedBypassConfig().TCPDialer)
+			echMgr.SetBypassDialer(makeProtectedBypassConfigWithDoH(dnsServers).TCPDialer)
 		}
 		if err := echMgr.Refresh(); err != nil {
 			log.Printf("[VPNManager] ECH initialization failed: %v, falling back to plain TLS", err)
@@ -182,6 +198,9 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 	}
 	// P1-6: store echMgr so Stop() can release its cleanup goroutine.
 	vm.echMgr = echMgr
+
+	// Store dnsServers for later use in bypass config
+	vm.dnsServers = dnsServers
 
 	// 2. 创建传输层
 	log.Printf("[VPNManager] Creating transport: %s", config.Protocol)
@@ -305,7 +324,11 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 				effectiveSNI = config.Host
 			}
 			if effectiveSNI != "" {
-				h3T.SetSNI(effectiveSNI)
+				// P2-11: h3grpc SetSNI now returns error
+				if err := h3T.SetSNI(effectiveSNI); err != nil {
+					cancel()
+					return fmt.Errorf("failed to set SNI: %w", err)
+				}
 			}
 		}
 		vm.transport = h3T
@@ -321,7 +344,7 @@ func (vm *vpnManager) Start(tunFD int, config *VPNConfig) error {
 
 	// 3. Android socket 保护：所有出站连接绑定到 VpnService.protect() 以避免 TUN 路由死循环
 	if IsSocketProtectorSet() {
-		vm.transport.SetBypassConfig(makeProtectedBypassConfig())
+		vm.transport.SetBypassConfig(makeProtectedBypassConfigWithDoH(vm.dnsServers))
 		log.Printf("[VPNManager] Socket protection applied to transport")
 	} else {
 		log.Printf("[VPNManager] Warning: No socket protector - transport may loop through TUN")

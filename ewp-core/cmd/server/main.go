@@ -215,13 +215,69 @@ func main() {
 		}
 		log.Info("WebSocket listener ready (TFO)")
 
-		srv := &http.Server{Handler: mux}
+		// P2-7: Wrap handler with panic recovery middleware
+		srv := &http.Server{Handler: recoverMiddleware(mux)}
 		log.Info("WebSocket server listening on :%s (path=%s)", port, wsPath)
 		log.Fatal(srv.Serve(lis))
 	}
 }
 
+// recoverMiddleware wraps an HTTP handler with panic recovery
+// P2-7: Prevents a single handler panic from crashing the entire server
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Errorf("PANIC recovered in HTTP handler: %v\nRequest: %s %s\nRemoteAddr: %s",
+					err, r.Method, r.URL.Path, r.RemoteAddr)
+				// Return 500 to client
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLocalNetwork checks if the remote address is from a private/local network.
+// P2-39: Restrict /health endpoint to LAN access only to prevent service fingerprinting.
+func isLocalNetwork(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	
+	// Check for loopback
+	if ip.IsLoopback() {
+		return true
+	}
+	
+	// Check for private networks (RFC 1918)
+	// 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+	if ip.IsPrivate() {
+		return true
+	}
+	
+	// Check for link-local (169.254.0.0/16, fe80::/10)
+	if ip.IsLinkLocalUnicast() {
+		return true
+	}
+	
+	return false
+}
+
+// healthHandler returns 200 OK for health checks.
+// P2-39: Only accessible from LAN to prevent service fingerprinting.
 func healthHandler(w http.ResponseWriter, r *http.Request) {
+	if !isLocalNetwork(r.RemoteAddr) {
+		http.NotFound(w, r)
+		return
+	}
+	
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))

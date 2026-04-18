@@ -10,6 +10,14 @@ import (
 	"ewp-core/constant"
 )
 
+// P2-25: Global variable to store config path for hot reload
+var lastConfigPath string
+
+// GetConfigPath returns the last loaded config path
+func GetConfigPath() string {
+	return lastConfigPath
+}
+
 // LegacyFlags holds command-line flags for backward compatibility
 type LegacyFlags struct {
 	ConfigFile string
@@ -364,6 +372,8 @@ func LoadConfigWithFallback() (*RootConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to load config file: %w", err)
 		}
+		// P2-25: Save config path for hot reload
+		lastConfigPath = flags.ConfigFile
 		return cfg, nil
 	}
 
@@ -371,6 +381,8 @@ func LoadConfigWithFallback() (*RootConfig, error) {
 	if cfgPath, err := FindConfigFile(); err == nil {
 		cfg, err := LoadConfig(cfgPath)
 		if err == nil {
+			// P2-25: Save config path for hot reload
+			lastConfigPath = cfgPath
 			return cfg, nil
 		}
 		// If file exists but has errors, return the error

@@ -30,7 +30,7 @@ data class EWPNode(
     
     val enableECH: Boolean = true,
     val echDomain: String = "cloudflare-ech.com",
-    val dnsServer: String = "dns.alidns.com/dns-query",
+    val dnsServer: String = "223.5.5.5/dns-query",  // Aliyun DNS (China-friendly)
     
     val enableFlow: Boolean = true,
     val enablePQC: Boolean = false,

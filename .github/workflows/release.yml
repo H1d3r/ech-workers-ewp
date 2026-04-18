@@ -16,6 +16,7 @@ on:
 permissions:
   contents: write
   actions: read
+  id-token: write  # P2-36: Required for Cosign keyless signing with OIDC
 
 jobs:
   prepare:
@@ -24,6 +25,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # P2-37: Use token parameter instead of URL to avoid token leakage in logs
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate Version Tag
         run: |
@@ -39,7 +43,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "${{ github.event.inputs.version }}" -m "Release ${{ github.event.inputs.version }}"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "${{ github.event.inputs.version }}"
+          # P2-37: Use default git push (credentials injected by actions/checkout)
+          git push origin "${{ github.event.inputs.version }}"
 
   build-core-client:
     name: Build Client (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -271,6 +276,58 @@ jobs:
           cd release-assets
           sha256sum * > checksums.txt
           cat checksums.txt
+
+      # P2-36: Install Cosign for artifact signing
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.3'
+
+      # P2-36: Sign all release artifacts with Cosign
+      - name: Sign Release Artifacts
+        run: |
+          cd release-assets
+          # Sign each artifact (keyless signing with GitHub OIDC)
+          for file in ewp-core-* ewp-gui-*.tar.gz; do
+            if [ -f "$file" ]; then
+              echo "Signing $file..."
+              cosign sign-blob --yes \
+                --bundle "${file}.cosign.bundle" \
+                "$file"
+            fi
+          done
+          
+          # Create a signatures manifest
+          cat > SIGNATURES.txt << 'EOF'
+          # Cosign Signature Verification
+          
+          All release artifacts are signed using Cosign with keyless signing (Sigstore).
+          
+          ## Verification Instructions
+          
+          1. Install Cosign: https://docs.sigstore.dev/cosign/installation/
+          
+          2. Verify a file:
+          ```bash
+          cosign verify-blob \
+            --bundle <file>.cosign.bundle \
+            --certificate-identity=https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.event.inputs.version }} \
+            --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+            <file>
+          ```
+          
+          Example:
+          ```bash
+          cosign verify-blob \
+            --bundle ewp-core-client-${{ github.event.inputs.version }}-linux-amd64.cosign.bundle \
+            --certificate-identity=https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.event.inputs.version }} \
+            --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+            ewp-core-client-${{ github.event.inputs.version }}-linux-amd64
+          ```
+          EOF
+          
+          echo "✅ All artifacts signed successfully"
+          ls -lh *.cosign.bundle
 
       - name: Generate Release Notes
         run: |

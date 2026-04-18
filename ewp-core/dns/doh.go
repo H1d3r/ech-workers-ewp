@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"ewp-core/constant"
@@ -183,4 +184,173 @@ func (c *Client) QueryRaw(dnsQuery []byte) ([]byte, error) {
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+// MultiClient represents a DoH client that races multiple servers.
+// P0-12: Provides redundancy and automatic failover. The first server to
+// respond successfully wins; others are cancelled. This prevents a single
+// slow/blocked DoH server from degrading the entire bootstrap process.
+type MultiClient struct {
+	clients []*Client
+	timeout time.Duration
+}
+
+// NewMultiClient creates a DoH client that races multiple servers.
+// serverURLs should contain 2+ DoH endpoints for redundancy.
+// Pass a bypass dialer to prevent DoH requests from being intercepted by TUN.
+func NewMultiClient(serverURLs []string, dialer *net.Dialer) *MultiClient {
+	if len(serverURLs) == 0 {
+		serverURLs = constant.DefaultDNSServers
+	}
+	
+	clients := make([]*Client, 0, len(serverURLs))
+	for _, url := range serverURLs {
+		clients = append(clients, NewClientWithDialer(url, dialer))
+	}
+	
+	return &MultiClient{
+		clients: clients,
+		timeout: 10 * time.Second,
+	}
+}
+
+// QueryHTTPS queries HTTPS record for ECH configuration from multiple servers.
+// Returns the first successful response; cancels remaining requests.
+func (mc *MultiClient) QueryHTTPS(domain string) (string, error) {
+	return mc.Query(domain, constant.TypeHTTPS)
+}
+
+// Query performs a DoH query racing all configured servers.
+// P0-12: First successful response wins; failures are logged but don't block.
+// Returns error only if ALL servers fail.
+func (mc *MultiClient) Query(domain string, qtype uint16) (string, error) {
+	if len(mc.clients) == 0 {
+		return "", fmt.Errorf("no DoH servers configured")
+	}
+	
+	// Fast path: single server
+	if len(mc.clients) == 1 {
+		return mc.clients[0].Query(domain, qtype)
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), mc.timeout)
+	defer cancel()
+	
+	type result struct {
+		data string
+		err  error
+		from string
+	}
+	
+	resultCh := make(chan result, len(mc.clients))
+	var wg sync.WaitGroup
+	
+	// Launch parallel queries
+	for _, client := range mc.clients {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			
+			// Check if context already cancelled
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			
+			data, err := c.Query(domain, qtype)
+			select {
+			case resultCh <- result{data: data, err: err, from: c.ServerURL}:
+			case <-ctx.Done():
+			}
+		}(client)
+	}
+	
+	// Close channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+	
+	// Collect results
+	var lastErr error
+	successCount := 0
+	failCount := 0
+	
+	for res := range resultCh {
+		if res.err == nil {
+			successCount++
+			log.Printf("[DoH MultiClient] ✅ %s responded first for %s", res.from, domain)
+			// Cancel remaining requests
+			cancel()
+			return res.data, nil
+		}
+		failCount++
+		lastErr = res.err
+		log.V("[DoH MultiClient] ❌ %s failed: %v", res.from, res.err)
+	}
+	
+	// All servers failed
+	return "", fmt.Errorf("all %d DoH servers failed (last error: %w)", failCount, lastErr)
+}
+
+// QueryRaw performs a raw DoH query racing all configured servers.
+func (mc *MultiClient) QueryRaw(dnsQuery []byte) ([]byte, error) {
+	if len(mc.clients) == 0 {
+		return nil, fmt.Errorf("no DoH servers configured")
+	}
+	
+	// Fast path: single server
+	if len(mc.clients) == 1 {
+		return mc.clients[0].QueryRaw(dnsQuery)
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), mc.timeout)
+	defer cancel()
+	
+	type result struct {
+		data []byte
+		err  error
+		from string
+	}
+	
+	resultCh := make(chan result, len(mc.clients))
+	var wg sync.WaitGroup
+	
+	// Launch parallel queries
+	for _, client := range mc.clients {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			
+			data, err := c.QueryRaw(dnsQuery)
+			select {
+			case resultCh <- result{data: data, err: err, from: c.ServerURL}:
+			case <-ctx.Done():
+			}
+		}(client)
+	}
+	
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+	
+	// Return first success
+	var lastErr error
+	for res := range resultCh {
+		if res.err == nil {
+			cancel()
+			return res.data, nil
+		}
+		lastErr = res.err
+	}
+	
+	return nil, fmt.Errorf("all DoH servers failed: %w", lastErr)
 }

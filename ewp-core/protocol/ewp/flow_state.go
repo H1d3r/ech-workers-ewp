@@ -8,16 +8,20 @@ import (
 // FlowState tracks traffic state for Vision-style flow control
 // Ported from Xray-core proxy/proxy.go TrafficState
 type FlowState struct {
-	UserUUID               []byte
-	NumberOfPacketToFilter int
-	EnableXtls             bool
-	IsTLS12orAbove         bool
-	IsTLS                  bool
-	Cipher                 uint16
-	RemainingServerHello   int32
-	Inbound                InboundState
-	Outbound               OutboundState
-	PaddingConfig          *PaddingConfig
+	UserUUID []byte
+	// P1-14: Split packet filter counters per direction for better TLS detection
+	UplinkPacketsToFilter   int // Uplink (client→server) filter window
+	DownlinkPacketsToFilter int // Downlink (server→client) filter window
+	EnableXtls              bool
+	IsTLS12orAbove          bool
+	IsTLS                   bool
+	Cipher                  uint16
+	RemainingServerHello    int32
+	Inbound                 InboundState
+	Outbound                OutboundState
+	PaddingConfig           *PaddingConfig
+	// P1-13: Ring buffer for accumulating TLS detection bytes across fragmented reads
+	filterBuffer []byte
 }
 
 type InboundState struct {
@@ -49,13 +53,15 @@ type OutboundState struct {
 // NewFlowState creates a new flow state with Vision defaults
 func NewFlowState(userUUID []byte) *FlowState {
 	return &FlowState{
-		UserUUID:               userUUID,
-		NumberOfPacketToFilter: 8, // Check first 8 packets
-		EnableXtls:             false,
-		IsTLS12orAbove:         false,
-		IsTLS:                  false,
-		Cipher:                 0,
-		RemainingServerHello:   -1,
+		UserUUID: userUUID,
+		// P1-14: Independent counters per direction (8 packets each)
+		UplinkPacketsToFilter:   8,
+		DownlinkPacketsToFilter: 8,
+		EnableXtls:              false,
+		IsTLS12orAbove:          false,
+		IsTLS:                   false,
+		Cipher:                  0,
+		RemainingServerHello:    -1,
 		Inbound: InboundState{
 			WithinPaddingBuffers:     true,
 			UplinkReaderDirectCopy:   false,
@@ -77,23 +83,36 @@ func NewFlowState(userUUID []byte) *FlowState {
 			UplinkWriterDirectCopy:   false,
 		},
 		PaddingConfig: DefaultPaddingConfig,
+		filterBuffer:  make([]byte, 0, 128), // P1-13: Pre-allocate buffer
 	}
 }
 
 // XtlsFilterTls filters and recognizes TLS 1.3 traffic
+// P1-13: Uses ring buffer to accumulate bytes across fragmented reads
+// P1-14: Uses per-direction counters for better detection
 // Ported from Xray-core proxy/proxy.go
-func (s *FlowState) XtlsFilterTls(data []byte) {
-	if s.NumberOfPacketToFilter <= 0 {
+func (s *FlowState) XtlsFilterTls(data []byte, isUplink bool) {
+	// P1-14: Check direction-specific counter
+	counter := &s.UplinkPacketsToFilter
+	if !isUplink {
+		counter = &s.DownlinkPacketsToFilter
+	}
+	
+	if *counter <= 0 {
 		return
 	}
 
-	s.NumberOfPacketToFilter--
+	*counter--
 
-	if len(data) < 6 {
+	// P1-13: Accumulate data in filter buffer for fragmented reads
+	s.filterBuffer = append(s.filterBuffer, data...)
+	
+	// Need at least 6 bytes to detect TLS
+	if len(s.filterBuffer) < 6 {
 		return
 	}
-
-	startsBytes := data[:6]
+	
+	startsBytes := s.filterBuffer[:6]
 
 	// Detect TLS Server Hello
 	if bytes.Equal(TlsServerHandShakeStart, startsBytes[:3]) && startsBytes[5] == TlsHandshakeTypeServerHello {
@@ -102,10 +121,10 @@ func (s *FlowState) XtlsFilterTls(data []byte) {
 		s.IsTLS = true
 
 		// Extract cipher suite if possible
-		if len(data) >= 79 && s.RemainingServerHello >= 79 {
-			sessionIdLen := int32(data[43])
-			if len(data) >= int(43+sessionIdLen+3) {
-				cipherSuite := data[43+sessionIdLen+1 : 43+sessionIdLen+3]
+		if len(s.filterBuffer) >= 79 && s.RemainingServerHello >= 79 {
+			sessionIdLen := int32(s.filterBuffer[43])
+			if len(s.filterBuffer) >= int(43+sessionIdLen+3) {
+				cipherSuite := s.filterBuffer[43+sessionIdLen+1 : 43+sessionIdLen+3]
 				s.Cipher = binary.BigEndian.Uint16(cipherSuite)
 			}
 		}
@@ -116,12 +135,12 @@ func (s *FlowState) XtlsFilterTls(data []byte) {
 	// Check for TLS 1.3 in Server Hello
 	if s.RemainingServerHello > 0 {
 		end := s.RemainingServerHello
-		if end > int32(len(data)) {
-			end = int32(len(data))
+		if end > int32(len(s.filterBuffer)) {
+			end = int32(len(s.filterBuffer))
 		}
-		s.RemainingServerHello -= int32(len(data))
+		s.RemainingServerHello -= int32(len(data)) // Decrement by current packet size
 
-		if bytes.Contains(data[:end], Tls13SupportedVersions) {
+		if bytes.Contains(s.filterBuffer[:end], Tls13SupportedVersions) {
 			// Found TLS 1.3!
 			if cipherName, ok := Tls13CipherSuiteDic[s.Cipher]; ok {
 				// Enable XTLS for all ciphers except TLS_AES_128_CCM_8_SHA256
@@ -129,13 +148,25 @@ func (s *FlowState) XtlsFilterTls(data []byte) {
 					s.EnableXtls = true
 				}
 			}
-			s.NumberOfPacketToFilter = 0 // Stop filtering
+			// Stop filtering both directions once TLS is detected
+			s.UplinkPacketsToFilter = 0
+			s.DownlinkPacketsToFilter = 0
+			s.filterBuffer = nil // Release buffer
 			return
 		} else if s.RemainingServerHello <= 0 {
 			// Found TLS 1.2
-			s.NumberOfPacketToFilter = 0
+			s.UplinkPacketsToFilter = 0
+			s.DownlinkPacketsToFilter = 0
+			s.filterBuffer = nil
 			return
 		}
+	}
+	
+	// P1-13: Limit buffer size to prevent unbounded growth
+	if len(s.filterBuffer) > 512 {
+		// Keep only the last 128 bytes
+		copy(s.filterBuffer, s.filterBuffer[len(s.filterBuffer)-128:])
+		s.filterBuffer = s.filterBuffer[:128]
 	}
 }
 
@@ -202,9 +233,9 @@ func (s *FlowState) CheckDirectCopySwitch(data []byte, isUplink bool) byte {
 
 // ProcessUplink processes uplink data (client -> server)
 func (s *FlowState) ProcessUplink(data []byte) []byte {
-	// Filter TLS if needed
-	if s.NumberOfPacketToFilter > 0 {
-		s.XtlsFilterTls(data)
+	// P1-14: Filter TLS with uplink-specific counter
+	if s.UplinkPacketsToFilter > 0 {
+		s.XtlsFilterTls(data, true)
 	}
 
 	// Unpad if within padding buffers
@@ -229,9 +260,9 @@ func (s *FlowState) ProcessUplink(data []byte) []byte {
 
 // ProcessDownlink processes downlink data (server -> client)
 func (s *FlowState) ProcessDownlink(data []byte) []byte {
-	// Filter TLS if needed
-	if s.NumberOfPacketToFilter > 0 {
-		s.XtlsFilterTls(data)
+	// P1-14: Filter TLS with downlink-specific counter
+	if s.DownlinkPacketsToFilter > 0 {
+		s.XtlsFilterTls(data, false)
 	}
 
 	// Unpad if within padding buffers

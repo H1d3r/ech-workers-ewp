@@ -209,6 +209,9 @@ QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
     if (node.enablePQC) {
         tls["pqc"] = true;
     }
+    // Bug-D: Field name verified - Core expects "use_mozilla_ca" (snake_case)
+    // which matches the JSON key used here. EWPNode.useMozillaCA (camelCase)
+    // is correctly serialized to "use_mozilla_ca" for Core compatibility.
     tls["use_mozilla_ca"] = node.useMozillaCA;
 
     return tls;

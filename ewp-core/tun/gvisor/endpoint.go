@@ -1,6 +1,9 @@
 package gvisor
 
 import (
+	commpool "ewp-core/common/bufferpool"
+	"ewp-core/constant"
+
 	tun "golang.zx2c4.com/wireguard/tun"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -44,14 +47,28 @@ func (e *endpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) 
 		return 0, nil
 	}
 
+	// P2-17: Use bufferpool to reduce GC pressure
 	bufs := make([][]byte, len(pktsSlice))
 	for i, pkt := range pktsSlice {
 		view := pkt.ToView()
 		data := view.AsSlice()
-		buf := make([]byte, len(data))
-		copy(buf, data)
+		
+		// Get buffer from pool based on size
+		var buf []byte
+		if len(data) <= constant.SmallBufferSize {
+			buf = commpool.GetSmall()
+			defer commpool.PutSmall(buf)
+		} else if len(data) <= constant.LargeBufferSize {
+			buf = commpool.GetLarge()
+			defer commpool.PutLarge(buf)
+		} else {
+			// Packet too large for pool, allocate directly
+			buf = make([]byte, len(data))
+		}
+		
+		copy(buf[:len(data)], data)
 		view.Release()
-		bufs[i] = buf
+		bufs[i] = buf[:len(data)]
 	}
 
 	if _, err := e.tunDev.Write(bufs, 0); err != nil {

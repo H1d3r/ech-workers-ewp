@@ -14,15 +14,16 @@ import (
 
 // ECHManager manages ECH configuration with TTL-based caching
 type ECHManager struct {
-	domain    string
-	dnsServer string
-	echList   []byte
-	lastFetch time.Time
-	cacheTTL  time.Duration
-	mu        sync.RWMutex
-	dnsClient *dns.Client
-	stopClean chan struct{}
-	cleanOnce sync.Once
+	domain        string
+	dnsServers    []string // P0-12: multiple DoH servers for redundancy
+	echList       []byte
+	lastFetch     time.Time
+	cacheTTL      time.Duration
+	mu            sync.RWMutex
+	dnsClient     interface{} // *dns.Client or *dns.MultiClient
+	stopClean     chan struct{}
+	cleanOnce     sync.Once
+	strictMode    bool // P0-12: if true, fail on ECH errors instead of fallback
 }
 
 // SetBypassDialer replaces the internal DoH client with one that uses the provided
@@ -32,30 +33,42 @@ type ECHManager struct {
 func (m *ECHManager) SetBypassDialer(d *net.Dialer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.dnsClient = dns.NewClientWithDialer(m.dnsServer, d)
+	// P0-12: use MultiClient for redundancy
+	if len(m.dnsServers) > 1 {
+		m.dnsClient = dns.NewMultiClient(m.dnsServers, d)
+	} else {
+		server := m.dnsServers[0]
+		m.dnsClient = dns.NewClientWithDialer(server, d)
+	}
 }
 
 // NewECHManager creates a new ECH manager with 1-hour cache TTL
-func NewECHManager(domain, dnsServer string) *ECHManager {
-	m := &ECHManager{
-		domain:    domain,
-		dnsServer: dnsServer,
-		cacheTTL:  1 * time.Hour,
-		dnsClient: dns.NewClient(dnsServer),
-		stopClean: make(chan struct{}),
-	}
-	m.startCleanupRoutine()
-	return m
+// P0-12: accepts multiple DNS servers; uses the first if only one provided
+func NewECHManager(domain string, dnsServers ...string) *ECHManager {
+	return NewECHManagerWithTTL(domain, 1*time.Hour, false, dnsServers...)
 }
 
 // NewECHManagerWithTTL creates a new ECH manager with custom cache TTL
-func NewECHManagerWithTTL(domain, dnsServer string, ttl time.Duration) *ECHManager {
+// P0-12: strictMode=true means ECH failures abort connection instead of fallback
+func NewECHManagerWithTTL(domain string, ttl time.Duration, strictMode bool, dnsServers ...string) *ECHManager {
+	if len(dnsServers) == 0 {
+		dnsServers = []string{dnsServers[0]} // use first default
+	}
+	
+	var client interface{}
+	if len(dnsServers) > 1 {
+		client = dns.NewMultiClient(dnsServers, nil)
+	} else {
+		client = dns.NewClient(dnsServers[0])
+	}
+	
 	m := &ECHManager{
-		domain:    domain,
-		dnsServer: dnsServer,
-		cacheTTL:  ttl,
-		dnsClient: dns.NewClient(dnsServer),
-		stopClean: make(chan struct{}),
+		domain:     domain,
+		dnsServers: dnsServers,
+		cacheTTL:   ttl,
+		dnsClient:  client,
+		stopClean:  make(chan struct{}),
+		strictMode: strictMode,
 	}
 	m.startCleanupRoutine()
 	return m
@@ -69,7 +82,19 @@ func (m *ECHManager) Refresh() error {
 	client := m.dnsClient
 	m.mu.RUnlock()
 
-	echBase64, err := client.QueryHTTPS(m.domain)
+	var echBase64 string
+	var err error
+	
+	// P0-12: support both single and multi-client
+	switch c := client.(type) {
+	case *dns.Client:
+		echBase64, err = c.QueryHTTPS(m.domain)
+	case *dns.MultiClient:
+		echBase64, err = c.QueryHTTPS(m.domain)
+	default:
+		return fmt.Errorf("invalid DNS client type")
+	}
+	
 	if err != nil {
 		return fmt.Errorf("DNS query failed: %w", err)
 	}
@@ -95,9 +120,11 @@ func (m *ECHManager) Refresh() error {
 }
 
 // Get returns the current ECH configuration, auto-refreshing if expired
+// P0-12: in strict mode, returns error instead of using expired cache
 func (m *ECHManager) Get() ([]byte, error) {
 	m.mu.RLock()
 	needsRefresh := m.isExpired()
+	strictMode := m.strictMode
 	m.mu.RUnlock()
 
 	// Auto-refresh if cache expired
@@ -105,7 +132,13 @@ func (m *ECHManager) Get() ([]byte, error) {
 		echlog.Printf("[ECH] Cache expired, auto-refreshing...")
 		if err := m.Refresh(); err != nil {
 			echlog.Printf("[ECH] Auto-refresh failed: %v", err)
-			// Return cached data even if expired (fallback)
+			
+			// P0-12: strict mode - fail instead of fallback
+			if strictMode {
+				return nil, fmt.Errorf("ECH refresh failed in strict mode: %w", err)
+			}
+			
+			// Fallback: return cached data even if expired
 			m.mu.RLock()
 			defer m.mu.RUnlock()
 			if len(m.echList) > 0 {
@@ -155,9 +188,17 @@ func (m *ECHManager) GetDomain() string {
 	return m.domain
 }
 
-// GetDNSServer returns the DNS server URL
+// GetDNSServer returns the DNS server URL (first one if multiple)
 func (m *ECHManager) GetDNSServer() string {
-	return m.dnsServer
+	if len(m.dnsServers) > 0 {
+		return m.dnsServers[0]
+	}
+	return ""
+}
+
+// GetDNSServers returns all configured DNS servers
+func (m *ECHManager) GetDNSServers() []string {
+	return m.dnsServers
 }
 
 // startCleanupRoutine starts a background goroutine to periodically check and refresh expired cache

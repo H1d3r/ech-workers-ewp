@@ -159,10 +159,11 @@ type TLSConfig struct {
 
 // ECHConfig defines ECH settings
 type ECHConfig struct {
-	Enabled         bool   `json:"enabled"`
-	ConfigDomain    string `json:"config_domain,omitempty"`
-	DOHServer       string `json:"doh_server,omitempty"`
-	FallbackOnError bool   `json:"fallback_on_error,omitempty"`
+	Enabled         bool     `json:"enabled"`
+	ConfigDomain    string   `json:"config_domain,omitempty"`
+	DOHServer       string   `json:"doh_server,omitempty"`        // Deprecated: use DOHServers (P0-12)
+	DOHServers      []string `json:"doh_servers,omitempty"`       // P0-12: multiple DoH servers for redundancy
+	FallbackOnError bool     `json:"fallback_on_error,omitempty"` // P0-12: if false, strict mode (fail on ECH errors)
 }
 
 // FlowConfig defines Vision flow control settings

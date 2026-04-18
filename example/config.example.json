@@ -48,7 +48,11 @@
         "ech": {
           "enabled": true,
           "config_domain": "cloudflare-ech.com",
-          "doh_server": "dns.alidns.com/dns-query",
+          "doh_servers": [
+            "https://223.5.5.5/dns-query",
+            "https://223.6.6.6/dns-query",
+            "https://doh.pub/dns-query"
+          ],
           "fallback_on_error": true
         },
         "pqc": false

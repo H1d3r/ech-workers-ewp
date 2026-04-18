@@ -17,9 +17,11 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 
-# Keep data classes for serialization
+# Keep data classes for serialization - refined to allow field name obfuscation
 -keep @kotlinx.serialization.Serializable class * {
-    *;
+    <init>(...);
+    *** Companion;
+    public static *** Companion();
 }
 
 # Keep Compose

@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -25,20 +26,32 @@ var (
 )
 
 type TunnelHandler struct {
-	transport transport.Transport
+	transport atomic.Value // stores transport.Transport for hot reload (P2-25)
 }
 
 func NewTunnelHandler(trans transport.Transport) *TunnelHandler {
-	return &TunnelHandler{
-		transport: trans,
-	}
+	h := &TunnelHandler{}
+	h.transport.Store(trans)
+	return h
+}
+
+// P2-25: UpdateTransport atomically updates the transport for hot reload
+func (h *TunnelHandler) UpdateTransport(trans transport.Transport) {
+	h.transport.Store(trans)
+}
+
+// getTransport returns the current transport
+func (h *TunnelHandler) getTransport() transport.Transport {
+	return h.transport.Load().(transport.Transport)
 }
 
 func (h *TunnelHandler) HandleTunnel(conn net.Conn, target string, clientAddr string, initialData []byte, sendSuccessReply func() error) error {
 	atomic.AddInt64(&activeConns, 1)
 	defer atomic.AddInt64(&activeConns, -1)
 
-	tunnelConn, err := h.transport.Dial()
+	// P2-25: Get current transport (may be updated by hot reload)
+	trans := h.getTransport()
+	tunnelConn, err := trans.Dial()
 	if err != nil {
 		return err
 	}
@@ -106,21 +119,49 @@ func (h *TunnelHandler) HandleTunnel(conn net.Conn, target string, clientAddr st
 
 // Dial creates a new tunnel connection for UDP sessions.
 func (h *TunnelHandler) Dial() (transport.TunnelConn, error) {
-	return h.transport.Dial()
+	// P2-25: Get current transport (may be updated by hot reload)
+	trans := h.getTransport()
+	return trans.Dial()
 }
 
+// IsNormalCloseError checks if an error represents a normal connection closure
+// P2-8: Use errors.Is instead of string matching for better maintainability
 func IsNormalCloseError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == io.EOF {
+	
+	// P2-8: Use errors.Is for standard errors
+	if errors.Is(err, io.EOF) {
 		return true
 	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	if errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	
+	// Check for common network close errors using errors.Is
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		// Connection reset, broken pipe, etc.
+		if netErr.Err != nil {
+			errStr := netErr.Err.Error()
+			if strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "broken pipe") {
+				return true
+			}
+		}
+	}
+	
+	// WebSocket normal closure
 	errStr := err.Error()
-	return strings.Contains(errStr, "use of closed network connection") ||
-		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "connection reset by peer") ||
-		strings.Contains(errStr, "normal closure")
+	if strings.Contains(errStr, "normal closure") {
+		return true
+	}
+	
+	return false
 }
 
 func GetStats() (active, upload, download int64) {

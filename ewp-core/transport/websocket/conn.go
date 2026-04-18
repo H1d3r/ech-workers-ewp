@@ -27,6 +27,7 @@ type Conn struct {
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	leftover  []byte
+	writeMu   sync.Mutex // P2-14: Protect concurrent writes (Write + ping goroutine)
 
 	uuid    [16]byte
 	version byte
@@ -66,6 +67,9 @@ func (c *Conn) OnClose(socket *gws.Conn, err error) {
 }
 
 func (c *Conn) OnPing(socket *gws.Conn, payload []byte) {
+	// P2-14: Protect concurrent writes
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	_ = socket.WritePong(payload)
 }
 
@@ -109,6 +113,10 @@ func (c *Conn) Read(buf []byte) (int, error) {
 }
 
 func (c *Conn) Write(data []byte) error {
+	// P2-14: Protect concurrent writes (Write + ping goroutine)
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	
 	if c.enableFlow && c.flowState != nil {
 		data = c.flowState.PadUplink(data, &c.writeOnceUserUUID)
 	}
@@ -137,7 +145,10 @@ func (c *Conn) StartPing(interval time.Duration) chan struct{} {
 		for {
 			select {
 			case <-t.C:
+				// P2-14: Protect concurrent writes
+				c.writeMu.Lock()
 				_ = c.socket.WritePing(nil)
+				c.writeMu.Unlock()
 			case <-stop:
 				return
 			case <-c.closeCh:

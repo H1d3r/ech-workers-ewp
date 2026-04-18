@@ -12,12 +12,13 @@ type ClientOptions struct {
 }
 
 func NewClient(options ClientOptions) (Config, error) {
+	// P1-9: propagate CA loading errors
 	if !options.EnableECH {
-		return NewSTDConfig(options.ServerName, options.UseMozillaCA, options.EnablePQC), nil
+		return NewSTDConfig(options.ServerName, options.UseMozillaCA, options.EnablePQC)
 	}
 
 	if len(options.ECHList) > 0 {
-		return NewSTDECHConfig(options.ServerName, options.UseMozillaCA, options.ECHList, options.EnablePQC), nil
+		return NewSTDECHConfig(options.ServerName, options.UseMozillaCA, options.ECHList, options.EnablePQC)
 	}
 
 	if options.ECHManager != nil {
@@ -25,14 +26,17 @@ func NewClient(options ClientOptions) (Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		cfg := NewSTDECHConfig(options.ServerName, options.UseMozillaCA, echList, options.EnablePQC)
+		cfg, err := NewSTDECHConfig(options.ServerName, options.UseMozillaCA, echList, options.EnablePQC)
+		if err != nil {
+			return nil, err
+		}
 		return &ManagedECHConfig{
 			STDECHConfig: cfg,
 			manager:      options.ECHManager,
 		}, nil
 	}
 
-	return NewSTDConfig(options.ServerName, options.UseMozillaCA, options.EnablePQC), nil
+	return NewSTDConfig(options.ServerName, options.UseMozillaCA, options.EnablePQC)
 }
 
 type ManagedECHConfig struct {

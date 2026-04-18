@@ -45,6 +45,7 @@ private slots:
     void onTunModeToggled(bool checked);
     
     void onShowSettings();
+    void onQuitApplication();  // P2-31: Proper quit action
     
     void updateNodeList();
     void updateStatusBar();

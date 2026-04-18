@@ -229,12 +229,16 @@ func (t *Transport) Dial() (transport.TunnelConn, error) {
 		ClientStreams: true,
 	}
 
-	stream, err := conn.NewStream(context.Background(), streamDesc, streamPath)
+	// P2-13: Create cancellable context for proper stream cleanup
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	stream, err := conn.NewStream(ctx, streamDesc, streamPath)
 	if err != nil {
+		cancel() // Clean up context if stream creation fails
 		return nil, fmt.Errorf("gRPC stream failed: %w", err)
 	}
 
-	return NewConn(conn, stream, t.uuid, t.password, t.enableFlow, t.useTrojan), nil
+	return NewConn(conn, stream, t.uuid, t.password, t.enableFlow, t.useTrojan, ctx, cancel), nil
 }
 
 func (t *Transport) getOrCreateConn(host, sniOverride, addr string) (*grpc.ClientConn, error) {

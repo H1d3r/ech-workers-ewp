@@ -52,7 +52,7 @@ fun NodeEditScreen(
 
     var enableECH by remember { mutableStateOf(existingNode?.enableECH ?: true) }
     var echDomain by remember { mutableStateOf(existingNode?.echDomain ?: "cloudflare-ech.com") }
-    var dnsServer by remember { mutableStateOf(existingNode?.dnsServer ?: "dns.alidns.com/dns-query") }
+    var dnsServer by remember { mutableStateOf(existingNode?.dnsServer ?: "223.5.5.5/dns-query") }
 
     var enablePQC by remember { mutableStateOf(existingNode?.enablePQC ?: false) }
     var enableFlow by remember { mutableStateOf(existingNode?.enableFlow ?: true) }
@@ -390,7 +390,7 @@ fun NodeEditScreen(
                             value = dnsServer,
                             onValueChange = { dnsServer = it },
                             label = { Text("DoH 服务器") },
-                            placeholder = { Text("dns.alidns.com/dns-query") },
+                            placeholder = { Text("223.5.5.5/dns-query") },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )

@@ -11,7 +11,9 @@ import (
 // instant fake responses, letting the proxy server handle real DNS resolution.
 //
 // IPv4 range: 198.18.0.1 – 198.19.255.254 (131,070 addresses)
-// IPv6 range: fc00::1 – fc00::fffe (65,534 addresses)
+// IPv6 range: fc00::1 – fc00::ffff:ffff (4,294,967,295 addresses, /96)
+// P1-30: Expanded IPv6 pool from /112 (65k) to /96 (4B) to prevent mapping
+// exhaustion in long-running clients with heavy AAAA queries.
 type FakeIPPool struct {
 	mu sync.RWMutex
 
@@ -21,11 +23,12 @@ type FakeIPPool struct {
 	ip4Size  uint32     // total allocatable addresses
 	ip4Start uint32     // first usable offset (skip .0)
 
-	// IPv6 pool: fc00::/112
+	// IPv6 pool: fc00::/96
+	// P1-30: Expanded to /96 range (4B addresses) to prevent exhaustion
 	ip6Base  netip.Addr
-	ip6Next  uint16
-	ip6Size  uint16
-	ip6Start uint16
+	ip6Next  uint32 // P1-30: Changed from uint16 to uint32 for /96 range
+	ip6Size  uint32 // P1-30: Changed from uint16 to uint32 for /96 range
+	ip6Start uint32 // P1-30: Changed from uint16 to uint32 for /96 range
 
 	// Bidirectional mappings
 	domainToIP4 map[string]netip.Addr // "google.com" → 198.18.0.1
@@ -42,9 +45,11 @@ func NewFakeIPPool() *FakeIPPool {
 		ip4Size:  131070,
 		ip4Start: 1,
 
+		// P1-30: Expanded IPv6 pool from /112 (65k) to /96 (4B addresses)
+		// This prevents mapping exhaustion in long-running clients
 		ip6Base:  netip.AddrFrom16([16]byte{0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
 		ip6Next:  1,
-		ip6Size:  65534,
+		ip6Size:  0xFFFFFFFF, // 4,294,967,295 addresses (full /96 range)
 		ip6Start: 1,
 
 		domainToIP4: make(map[string]netip.Addr, 4096),
@@ -141,6 +146,7 @@ func (p *FakeIPPool) nextIPv4() netip.Addr {
 }
 
 // nextIPv6 allocates the next IPv6 from the pool (caller must hold mu).
+// P1-30: Expanded to use /96 range (last 4 bytes) instead of /112 (last 2 bytes)
 func (p *FakeIPPool) nextIPv6() netip.Addr {
 	offset := p.ip6Next
 	p.ip6Next++
@@ -149,8 +155,9 @@ func (p *FakeIPPool) nextIPv6() netip.Addr {
 	}
 
 	b := p.ip6Base.As16()
-	// Use the last 2 bytes for the offset
-	binary.BigEndian.PutUint16(b[14:16], offset)
+	// P1-30: Use the last 4 bytes for the offset (/96 range)
+	// This gives us 4 billion addresses instead of 65k
+	binary.BigEndian.PutUint32(b[12:16], offset)
 	return netip.AddrFrom16(b)
 }
 

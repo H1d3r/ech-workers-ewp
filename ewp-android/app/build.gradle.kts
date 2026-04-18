@@ -106,6 +106,9 @@ dependencies {
     // Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
     
+    // Security - P1-25: EncryptedSharedPreferences for credential protection
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    
     // DataStore
     implementation("androidx.datastore:datastore-preferences:1.0.0")
     

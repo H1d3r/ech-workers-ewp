@@ -73,12 +73,24 @@ func NewBypassDialer(serverAddr string) (*BypassDialer, error) {
 // ToBypassConfig converts to the transport.BypassConfig used by all transports.
 // A BypassResolver is automatically created so that DNS queries also bypass the TUN
 // and all resolved IPs are probed to select the optimal CDN edge node.
-func (b *BypassDialer) ToBypassConfig() *transport.BypassConfig {
+// dohServers can be provided to use custom DoH servers (e.g., from ech.doh_servers config).
+func (b *BypassDialer) ToBypassConfig(dohServers []string) *transport.BypassConfig {
 	cfg := &transport.BypassConfig{
 		TCPDialer:       b.Dialer,
 		UDPListenConfig: b.ListenConfig,
 	}
-	cfg.Resolver = transport.NewBypassResolver(cfg, "")
+	
+	// Use custom DoH servers if provided, otherwise use default
+	var dohServer string
+	if len(dohServers) == 1 {
+		dohServer = dohServers[0]
+	} else if len(dohServers) > 1 {
+		// Multi-server mode: pass first server, resolver will detect and use all
+		dohServer = dohServers[0]
+	}
+	// Empty string will trigger default multi-DoH racing
+	
+	cfg.Resolver = transport.NewBypassResolver(cfg, dohServer, dohServers)
 	return cfg
 }
 

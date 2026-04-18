@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
+#include <QRandomGenerator>  // P2-33: For backoff jitter
 
 #ifdef Q_OS_WIN
 #include <Windows.h>
@@ -258,14 +259,25 @@ void CoreProcess::scheduleReconnect()
         return;
     }
     
-    int delaySec = 2 << retryCount;
+    // P2-33: Add jitter to backoff to prevent thundering herd
+    int baseDelaySec = 2 << retryCount;  // Exponential: 2, 4, 8, 16, 32...
+    int maxDelaySec = 30;  // Cap at 30 seconds
+    int delaySec = qMin(baseDelaySec, maxDelaySec);
+    
+    // Add ±500ms jitter
+    int jitterMs = QRandomGenerator::global()->bounded(1000) - 500;  // -500 to +499
+    int delayMs = delaySec * 1000 + jitterMs;
+    
     retryCount++;
     
     emit reconnecting(retryCount, kMaxRetries);
-    emit logReceived(QString("⚠️ 核心进程崩溃，%1 秒后尝试第 %2/%3 次重连...")
-                         .arg(delaySec).arg(retryCount).arg(kMaxRetries));
+    emit logReceived(QString("⚠️ 核心进程崩溃，%1.%2 秒后尝试第 %3/%4 次重连...")
+                         .arg(delayMs / 1000)
+                         .arg(qAbs(delayMs % 1000), 3, 10, QChar('0'))
+                         .arg(retryCount)
+                         .arg(kMaxRetries));
     
-    retryTimer->start(delaySec * 1000);
+    retryTimer->start(delayMs);
 }
 
 void CoreProcess::attemptReconnect()

@@ -38,7 +38,13 @@ func GetSmall() []byte {
 }
 
 // PutSmall returns a small buffer to the pool
+// P2-6: Validate buffer capacity to prevent foreign buffers from polluting the pool
 func PutSmall(buf []byte) {
+	if cap(buf) < constant.SmallBufferSize {
+		// Foreign buffer detected - log and discard
+		// This prevents pool pollution where Get() might return incorrectly sized buffers
+		return
+	}
 	if cap(buf) >= constant.SmallBufferSize {
 		buf = buf[:constant.SmallBufferSize]
 		SmallPool.Put(&buf)
@@ -51,7 +57,13 @@ func GetLarge() []byte {
 }
 
 // PutLarge returns a large buffer to the pool
+// P2-6: Validate buffer capacity to prevent foreign buffers from polluting the pool
 func PutLarge(buf []byte) {
+	if cap(buf) < constant.LargeBufferSize {
+		// Foreign buffer detected - log and discard
+		// This prevents pool pollution where Get() might return incorrectly sized buffers
+		return
+	}
 	if cap(buf) >= constant.LargeBufferSize {
 		buf = buf[:constant.LargeBufferSize]
 		LargePool.Put(&buf)
@@ -64,7 +76,13 @@ func GetUDP() []byte {
 }
 
 // PutUDP returns a UDP buffer to the pool
+// P2-6: Validate buffer capacity to prevent foreign buffers from polluting the pool
 func PutUDP(buf []byte) {
+	if cap(buf) < constant.UDPBufferSize {
+		// Foreign buffer detected - log and discard
+		// This prevents pool pollution where Get() might return incorrectly sized buffers
+		return
+	}
 	if cap(buf) >= constant.UDPBufferSize {
 		buf = buf[:constant.UDPBufferSize]
 		UDPPool.Put(&buf)

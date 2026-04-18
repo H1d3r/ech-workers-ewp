@@ -28,8 +28,9 @@ type Config struct {
 	MTU             int
 	Stack           string
 	Transport       transport.Transport
-	ServerAddr      string // proxy server address; used to detect the physical outbound interface for bypass dialing
-	TunnelDoHServer string // DoH server URL for tunnel DNS resolver (default: https://dns.google/dns-query)
+	ServerAddr      string   // proxy server address; used to detect the physical outbound interface for bypass dialing
+	TunnelDoHServer string   // DoH server URL for tunnel DNS resolver (user traffic, default: https://dns.google/dns-query)
+	BypassDoHServers []string // DoH servers for bypass resolver (proxy server resolution, uses ech.doh_servers if set)
 }
 
 type TUN struct {
@@ -124,7 +125,8 @@ func (t *TUN) Setup() error {
 		if err != nil {
 			log.Printf("[TUN] Warning: bypass dialer init failed: %v (routing loop risk)", err)
 		} else {
-			t.config.Transport.SetBypassConfig(bd.ToBypassConfig())
+			// Pass BypassDoHServers from config (usually from ech.doh_servers)
+			t.config.Transport.SetBypassConfig(bd.ToBypassConfig(t.config.BypassDoHServers))
 			log.Printf("[TUN] Bypass dialer active on interface %s", ifName)
 		}
 	} else {

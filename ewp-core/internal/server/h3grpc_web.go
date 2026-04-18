@@ -139,7 +139,8 @@ func (t *GRPCWebH3Transport) Close() error {
 // NewH3GRPCWebHandler returns an http.Handler that handles gRPC-Web framed tunnel
 // connections over HTTP/3 without involving grpc.Server (which requires HTTP/2).
 // protocolFactory is called once per request to create the protocol handler.
-func NewH3GRPCWebHandler(protocolFactory func() ProtocolHandler) http.Handler {
+// getClientIP extracts the real client IP from the request (P2-18).
+func NewH3GRPCWebHandler(protocolFactory func() ProtocolHandler, getClientIP func(*http.Request) string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/grpc-web+proto")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -151,7 +152,8 @@ func NewH3GRPCWebHandler(protocolFactory func() ProtocolHandler) http.Handler {
 			flush = f.Flush
 		}
 
-		clientIP := r.RemoteAddr
+		// P2-18: Use getClientIP to handle X-Forwarded-For from trusted proxies
+		clientIP := getClientIP(r)
 
 		tr := NewGRPCWebH3Transport(r.Body, w, flush)
 

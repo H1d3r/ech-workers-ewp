@@ -51,7 +51,7 @@ struct EWPNode {
     // ECH 配置
     bool enableECH = true;
     QString echDomain = "cloudflare-ech.com";
-    QString dnsServer = "dns.alidns.com/dns-query";
+    QString dnsServer = "223.5.5.5/dns-query";  // Aliyun DNS (China-friendly)
 
     // PQC（独立于 ECH）
     bool enablePQC = false;
@@ -113,7 +113,7 @@ struct EWPNode {
         node.minTLSVersion = obj["minTLSVersion"].toString("1.2");
         node.enableECH = obj["enableECH"].toBool(true);
         node.echDomain = obj["echDomain"].toString("cloudflare-ech.com");
-        node.dnsServer = obj["dnsServer"].toString("dns.alidns.com/dns-query");
+        node.dnsServer = obj["dnsServer"].toString("223.5.5.5/dns-query");
         node.enablePQC = obj["enablePQC"].toBool(false);
         node.enableFlow = obj["enableFlow"].toBool(true);
         node.useMozillaCA = obj["useMozillaCA"].toBool(true);

@@ -142,7 +142,8 @@ func createUnifiedHandler(cfg *option.ServerConfig) http.Handler {
 				// Use the native gRPC-Web handler that works over any HTTP version
 				// (H1, H2, H3). This is required for CDN scenarios where nginx
 				// proxies over HTTP/1.1, bypassing grpc.Server's ProtoMajor==2 check.
-				mux.Handle(grpcPath, server.NewH3GRPCWebHandler(newProtocolHandler))
+				// P2-18: Pass getClientIP to handle X-Forwarded-For from trusted proxies
+				mux.Handle(grpcPath, server.NewH3GRPCWebHandler(newProtocolHandler, getClientIP))
 				log.Info("gRPC-Web handler registered (H1/H2/H3 compatible, service: %s)", serviceName)
 			} else {
 				// Standard gRPC mode: requires the client to connect over HTTP/2.
@@ -251,7 +252,8 @@ func startH3Listener(cfg *option.ServerConfig, tlsConfig *tls.Config) {
 
 	mux := http.NewServeMux()
 	tunnelPath := "/" + serviceName + "/Tunnel"
-	mux.Handle(tunnelPath, server.NewH3GRPCWebHandler(newProtocolHandler))
+	// P2-18: Pass getClientIP to handle X-Forwarded-For from trusted proxies
+	mux.Handle(tunnelPath, server.NewH3GRPCWebHandler(newProtocolHandler, getClientIP))
 	mux.HandleFunc("/", disguiseHandler)
 
 	quicConfig := &quic.Config{

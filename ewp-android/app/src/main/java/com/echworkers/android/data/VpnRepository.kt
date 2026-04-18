@@ -57,9 +57,12 @@ class VpnRepository(private val context: Context) {
     
     fun connect(node: EWPNode, proxyConfig: ProxyConfig) {
         try {
+            // P1-18: Pass only nodeId instead of full node JSON to prevent
+            // credential leakage via Intent extras (visible in dumpsys/logs).
+            // EWPVpnService will retrieve the node from encrypted storage.
             val intent = Intent(context, EWPVpnService::class.java).apply {
                 action = EWPVpnService.ACTION_START
-                putExtra(EWPVpnService.EXTRA_NODE_JSON, json.encodeToString(node))
+                putExtra(EWPVpnService.EXTRA_NODE_ID, node.id)
                 putExtra(EWPVpnService.EXTRA_PROXY_CONFIG_JSON, json.encodeToString(proxyConfig))
             }
             context.startService(intent)

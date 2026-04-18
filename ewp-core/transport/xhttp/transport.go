@@ -481,6 +481,12 @@ func (t *Transport) dialStreamDown() (transport.TunnelConn, error) {
 }
 
 // isIPAddress checks if a string is an IP address
+// isIPAddress checks if a string is a valid IP address
+// P2-15: Handle IPv6 addresses with brackets like [::1]
 func isIPAddress(s string) bool {
+	// Strip brackets for IPv6 literals
+	if len(s) > 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		s = s[1 : len(s)-1]
+	}
 	return net.ParseIP(s) != nil
 }

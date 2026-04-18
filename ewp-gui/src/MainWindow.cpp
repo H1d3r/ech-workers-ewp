@@ -140,7 +140,7 @@ void MainWindow::setupSystemTray()
     trayMenu->addSeparator();
     
     auto quitAction = trayMenu->addAction("退出");
-    connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
+    connect(quitAction, &QAction::triggered, this, &MainWindow::onQuitApplication);
     
     trayIcon->setContextMenu(trayMenu);
     connect(trayIcon, &QSystemTrayIcon::activated, 
@@ -181,7 +181,7 @@ void MainWindow::setupMenu()
     
     QAction *quitAction = new QAction("退出(&Q)", this);
     quitAction->setShortcut(QKeySequence::Quit);
-    connect(quitAction, &QAction::triggered, this, &QMainWindow::close);
+    connect(quitAction, &QAction::triggered, this, &MainWindow::onQuitApplication);
     fileMenu->addAction(quitAction);
     
     // 帮助菜单
@@ -200,9 +200,68 @@ void MainWindow::onShowSettings()
     SettingsDialog dialog(this);
     if (dialog.exec() == QDialog::Accepted) {
         appendLog("⚙️ 设置已保存");
-        // 重新加载CoreProcess配置
-        // coreProcess可能需要重启以应用新配置
+        
+        // P2-32: Prompt to restart core if settings changed and core is running
+        if (isRunning) {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this,
+                "重启核心进程",
+                "设置已更改。需要重启核心进程以应用新配置。\n\n是否立即重启?",
+                QMessageBox::Yes | QMessageBox::No
+            );
+            
+            if (reply == QMessageBox::Yes) {
+                appendLog("🔄 正在重启核心进程以应用新配置...");
+                
+                // Save current node and tun mode
+                int savedNodeId = currentNodeId;
+                bool savedTunMode = ui->checkTunMode->isChecked();
+                bool savedSystemProxy = ui->checkSystemProxy->isChecked();
+                
+                // Stop current process
+                coreProcess->stop();
+                if (savedSystemProxy) {
+                    systemProxy->disable();
+                }
+                
+                // Wait a bit for clean shutdown
+                QTimer::singleShot(500, this, [this, savedNodeId, savedTunMode, savedSystemProxy]() {
+                    // Restart with same node
+                    auto node = nodeManager->getNode(savedNodeId);
+                    if (node.isValid()) {
+                        if (coreProcess->start(node, savedTunMode)) {
+                            if (savedSystemProxy && !savedTunMode) {
+                                systemProxy->enable(coreProcess->getListenAddr());
+                            }
+                            appendLog("✅ 核心进程已重启");
+                        } else {
+                            appendLog("❌ 重启失败");
+                        }
+                    }
+                });
+            }
+        }
     }
+}
+
+// P2-31: Proper quit action with confirmation
+void MainWindow::onQuitApplication()
+{
+    if (isRunning) {
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this,
+            "确认退出",
+            "代理正在运行中。确定要退出吗?",
+            QMessageBox::Yes | QMessageBox::No
+        );
+        
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+    }
+    
+    // Actually quit the application
+    QApplication::quit();
 }
 
 void MainWindow::updateNodeList()
@@ -366,6 +425,32 @@ void MainWindow::onImportFromClipboard()
     auto nodes = ShareLink::parseLinks(text);
     if (nodes.isEmpty()) {
         QMessageBox::warning(this, "导入失败", "未找到有效的分享链接");
+        return;
+    }
+    
+    // P1-21: Confirmation dialog before importing nodes
+    // Build server list for display
+    QStringList serverList;
+    for (const auto &node : nodes) {
+        QString serverInfo = QString("%1:%2 (%3)")
+            .arg(node.server)
+            .arg(node.serverPort)
+            .arg(node.name.isEmpty() ? "未命名" : node.name);
+        serverList.append(serverInfo);
+    }
+    
+    QString message = QString("将导入 %1 个节点:\n\n%2\n\n确认导入?")
+        .arg(nodes.size())
+        .arg(serverList.join("\n"));
+    
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this, 
+        "确认导入", 
+        message,
+        QMessageBox::Yes | QMessageBox::No
+    );
+    
+    if (reply != QMessageBox::Yes) {
         return;
     }
     

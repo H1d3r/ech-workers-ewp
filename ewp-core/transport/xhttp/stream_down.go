@@ -3,6 +3,7 @@
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -176,8 +177,18 @@ func (c *StreamDownConn) Connect(target string, initialData []byte) error {
 	return nil
 }
 
-// ConnectUDP sends UDP connection request using EWP native UDP protocol
+// ConnectUDP sends UDP connection request
+// Bug-E: Explicitly branch between EWP and Trojan UDP protocols
 func (c *StreamDownConn) ConnectUDP(target transport.Endpoint, initialData []byte) error {
+	// Bug-E: Explicit protocol branching for clarity
+	if c.useTrojan {
+		return c.connectTrojanUDP(target, initialData)
+	}
+	return c.connectEWPUDP(target, initialData)
+}
+
+// connectEWPUDP handles EWP native UDP protocol
+func (c *StreamDownConn) connectEWPUDP(target transport.Endpoint, initialData []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -284,10 +295,119 @@ func (c *StreamDownConn) ConnectUDP(target transport.Endpoint, initialData []byt
 	}
 
 	c.respBody = getResp.Body
+	c.connected = true
+	log.V("[XHTTP] stream-down EWP UDP connected, target: %v, SessionID: %s", target, c.sessionID)
+	return nil
+}
 
-	// For Trojan UDP, no additional EWP UDPStatusNew packet is needed.
-	// The UDP handshake and target are already included in initial write.
+// connectTrojanUDP handles Trojan UDP protocol over XHTTP stream-down
+// Bug-E: Explicit implementation of Trojan UDP path
+func (c *StreamDownConn) connectTrojanUDP(target transport.Endpoint, initialData []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	// Trojan UDP uses simple handshake - just establish the HTTP stream
+	// The actual UDP target is sent with each packet
+	
+	var padding string
+	if c.transport.enablePadding && !c.transport.paddingInReferer {
+		paddingLen := c.transport.paddingBytes.Rand()
+		if paddingLen > 0 {
+			padding = strings.Repeat("X", int(paddingLen))
+		}
+	}
+
+	// For Trojan, handshake is simpler - just password verification
+	handshakeURL := fmt.Sprintf("https://%s:%s%s/%s/0", c.host, c.port, c.path, c.sessionID)
+	if padding != "" {
+		handshakeURL += "?x_padding=" + padding
+	}
+
+	ctx := context.Background()
+	
+	// Trojan handshake: password + CRLF + CMD (0x03 for UDP) + target + CRLF
+	var handshakeBuf bytes.Buffer
+	handshakeBuf.WriteString(c.password)
+	handshakeBuf.Write(trojan.CRLF)
+	handshakeBuf.WriteByte(trojan.CommandUDP)
+	
+	// Encode target address
+	if target.Domain != "" {
+		handshakeBuf.WriteByte(trojan.AddressTypeDomain)
+		handshakeBuf.WriteByte(byte(len(target.Domain)))
+		handshakeBuf.WriteString(target.Domain)
+	} else if target.Addr.Addr().Is4() {
+		handshakeBuf.WriteByte(trojan.AddressTypeIPv4)
+		ipv4 := target.Addr.Addr().As4()
+		handshakeBuf.Write(ipv4[:])
+	} else {
+		handshakeBuf.WriteByte(trojan.AddressTypeIPv6)
+		ipv6 := target.Addr.Addr().As16()
+		handshakeBuf.Write(ipv6[:])
+	}
+	binary.Write(&handshakeBuf, binary.BigEndian, target.Port)
+	handshakeBuf.Write(trojan.CRLF)
+	
+	// Add initial data if present
+	if len(initialData) > 0 {
+		length := uint16(len(initialData))
+		binary.Write(&handshakeBuf, binary.BigEndian, length)
+		handshakeBuf.Write(trojan.CRLF)
+		handshakeBuf.Write(initialData)
+	}
+
+	handshakeReq, err := c.transport.createRequestWithContext(ctx, "POST", handshakeURL, &handshakeBuf)
+	if err != nil {
+		return fmt.Errorf("create handshake request: %w", err)
+	}
+
+	headers := c.transport.GetRequestHeader(handshakeURL)
+	for k, v := range headers {
+		handshakeReq.Header[k] = v
+	}
+	handshakeReq.ContentLength = int64(handshakeBuf.Len())
+
+	handshakeResp, err := c.httpClient.Do(handshakeReq)
+	if err != nil {
+		return fmt.Errorf("handshake request failed: %w", err)
+	}
+	defer handshakeResp.Body.Close()
+
+	if handshakeResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(handshakeResp.Body)
+		return fmt.Errorf("handshake http error: %d %s, body: %s", handshakeResp.StatusCode, handshakeResp.Status, body)
+	}
+
+	c.uploadSeq = 1
+
+	// 构造下载 URL
+	getURL := fmt.Sprintf("https://%s:%s%s/%s", c.host, c.port, c.path, c.sessionID)
+	if padding != "" {
+		getURL += "?x_padding=" + padding
+	}
+
+	getReq, err := c.transport.createRequestWithContext(ctx, "GET", getURL, nil)
+	if err != nil {
+		return fmt.Errorf("create GET request: %w", err)
+	}
+
+	headers = c.transport.GetRequestHeader(getURL)
+	for k, v := range headers {
+		getReq.Header[k] = v
+	}
+
+	getResp, err := c.httpClient.Do(getReq)
+	if err != nil {
+		return fmt.Errorf("GET request failed: %w", err)
+	}
+
+	if getResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(getResp.Body)
+		getResp.Body.Close()
+		return fmt.Errorf("GET http error: %d %s, body: %s", getResp.StatusCode, getResp.Status, body)
+	}
+
+	c.respBody = getResp.Body
 	c.connected = true
 	log.V("[XHTTP] stream-down Trojan UDP connected, target: %v, SessionID: %s", target, c.sessionID)
 	return nil
@@ -561,8 +681,14 @@ func (c *StreamDownConn) Close() error {
 }
 
 // generateSessionID 生成会话 ID
+// P2-21: Use crypto/rand for unpredictable session IDs
 func generateSessionID() string {
-	return fmt.Sprintf("%x", time.Now().UnixNano())
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to timestamp if randomness fails (should never happen)
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b[:])
 }
 
 func (c *StreamDownConn) StartPing(interval time.Duration) chan struct{} {

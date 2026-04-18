@@ -29,7 +29,8 @@ class EWPVpnService : VpnService(), SocketProtector {
         const val ACTION_START = "com.echworkers.android.START_VPN"
         const val ACTION_STOP = "com.echworkers.android.STOP_VPN"
         
-        const val EXTRA_NODE_JSON = "node_json"
+        // P1-18: Changed from EXTRA_NODE_JSON to EXTRA_NODE_ID to prevent credential leakage
+        const val EXTRA_NODE_ID = "node_id"
         const val EXTRA_PROXY_CONFIG_JSON = "proxy_config_json"
         
         private const val NOTIFICATION_ID = 1
@@ -66,22 +67,37 @@ class EWPVpnService : VpnService(), SocketProtector {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val nodeJson = intent.getStringExtra(EXTRA_NODE_JSON)
+                // P1-18: Retrieve node from encrypted storage instead of Intent extras
+                val nodeId = intent.getStringExtra(EXTRA_NODE_ID)
                 val proxyConfigJson = intent.getStringExtra(EXTRA_PROXY_CONFIG_JSON)
                 
-                if (nodeJson != null) {
+                if (nodeId != null) {
                     try {
-                        val node = Json.decodeFromString<EWPNode>(nodeJson)
+                        // Retrieve node from encrypted SharedPreferences (P1-25)
+                        val nodeRepository = com.echworkers.android.data.NodeRepository(this)
+                        val node = nodeRepository.getNodeById(nodeId)
+                        
+                        if (node == null) {
+                            Log.e(TAG, "Node not found: $nodeId")
+                            broadcastError("节点不存在")
+                            stopSelf()
+                            return START_NOT_STICKY
+                        }
+                        
                         proxyConfig = proxyConfigJson?.let { 
                             Json.decodeFromString(it) 
                         } ?: ProxyConfig()
                         
                         startVPN(node)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse node JSON", e)
-                        broadcastError("配置解析失败: ${e.message}")
+                        Log.e(TAG, "Failed to load node", e)
+                        broadcastError("节点加载失败: ${e.message}")
                         stopSelf()
                     }
+                } else {
+                    Log.e(TAG, "No node ID provided")
+                    broadcastError("缺少节点 ID")
+                    stopSelf()
                 }
             }
             ACTION_STOP -> {
@@ -286,7 +302,9 @@ class EWPVpnService : VpnService(), SocketProtector {
     private fun monitorVPN() {
         scope.launch {
             while (Ewpmobile.isVPNRunning()) {
-                delay(2000)
+                // P2-29: Increased from 2s to 5s to reduce battery consumption
+                // Stats updates every 5 seconds are sufficient for user experience
+                delay(5000)
                 
                 try {
                     val statsJson = Ewpmobile.getVPNStats()

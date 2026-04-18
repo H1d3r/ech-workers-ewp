@@ -1,13 +1,29 @@
 package dns
 
-import "encoding/binary"
+import (
+	"crypto/rand"
+	"encoding/binary"
+	"math/big"
+)
 
 // BuildQuery builds a DNS query message for the given domain and record type
+// P2-3: Uses random TXID to avoid fingerprinting
 func BuildQuery(domain string, qtype uint16) []byte {
 	var query []byte
 
 	// DNS Header (12 bytes)
-	query = append(query, 0x00, 0x01) // Transaction ID
+	// P2-3: Random TXID instead of hardcoded 0x0001 to avoid DPI fingerprinting
+	txidBig, err := rand.Int(rand.Reader, big.NewInt(65535))
+	if err != nil {
+		// Fallback to non-zero constant if randomness fails
+		query = append(query, 0x00, 0x01)
+	} else {
+		txid := uint16(txidBig.Int64() + 1) // 1-65535, avoid 0
+		txidBytes := make([]byte, 2)
+		binary.BigEndian.PutUint16(txidBytes, txid)
+		query = append(query, txidBytes...)
+	}
+	
 	query = append(query, 0x01, 0x00) // Flags: Standard query
 	query = append(query, 0x00, 0x01) // Questions: 1
 	query = append(query, 0x00, 0x00) // Answer RRs: 0

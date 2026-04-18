@@ -183,7 +183,20 @@ func DecodeAddress(data []byte) (Address, int, error) {
 		if len(data) < offset+addrLen+2 {
 			return Address{}, 0, errors.New("truncated domain address")
 		}
-		addr.Host = string(data[offset : offset+addrLen])
+		domain := string(data[offset : offset+addrLen])
+		
+		// P2-2: Validate domain contains only printable ASCII characters
+		// to prevent log injection attacks (e.g., \n, \0, ANSI escape codes)
+		for i := 0; i < len(domain); i++ {
+			c := domain[i]
+			// Allow printable ASCII (0x20-0x7E) and some extended chars for IDN
+			// Reject control characters (0x00-0x1F, 0x7F) that could inject logs
+			if c < 0x20 || c == 0x7F {
+				return Address{}, 0, fmt.Errorf("invalid domain: contains control character 0x%02x", c)
+			}
+		}
+		
+		addr.Host = domain
 		offset += addrLen
 
 	case AddressTypeIPv6:

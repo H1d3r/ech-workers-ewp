@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -459,13 +460,19 @@ func (m *UDPSessionManager) Close() {
 var globalIDBaseKey [32]byte
 
 func init() {
-	crand.Read(globalIDBaseKey[:])
+	// P1-26: globalIDBaseKey is used for session ID generation - must be random
+	if _, err := crand.Read(globalIDBaseKey[:]); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed in init: %v - cannot initialize secure session IDs", err))
+	}
 }
 
 // NewGlobalID 生成一个新的随机 GlobalID (客户端 UDP 会话使用)
+// P1-26: panics on crypto/rand failure as non-random IDs break session isolation
 func NewGlobalID() [8]byte {
 	var id [8]byte
-	crand.Read(id[:])
+	if _, err := crand.Read(id[:]); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v - cannot generate secure GlobalID", err))
+	}
 	return id
 }
 

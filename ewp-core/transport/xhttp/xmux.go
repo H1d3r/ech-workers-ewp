@@ -2,9 +2,8 @@ package xhttp
 
 import (
 	"context"
-	"crypto/rand"
 	"math"
-	"math/big"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -165,9 +164,9 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient {
 		return m.newXmuxClient()
 	}
 
-	// 随机选择一个连接
-	i, _ := rand.Int(rand.Reader, big.NewInt(int64(len(availableClients))))
-	xmuxClient := availableClients[i.Int64()]
+	// P2-22: Use math/rand instead of crypto/rand for client selection
+	// (cryptographic randomness is overkill for load balancing)
+	xmuxClient := availableClients[rand.Intn(len(availableClients))]
 
 	// 更新使用统计
 	if xmuxClient.leftUsage > 0 {

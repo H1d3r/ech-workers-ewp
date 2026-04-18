@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"container/list"
 	"encoding/binary"
 	"net/netip"
 	"sync"
@@ -10,16 +11,18 @@ import (
 // ReverseMapping stores IP→domain mappings from real DNS responses.
 // This enables domain-based routing even when FakeIP is not used.
 // Thread-safe with LRU eviction and TTL-based expiration.
+// P2-5: Uses container/list for O(1) LRU operations
 type ReverseMapping struct {
 	mu         sync.RWMutex
 	entries    map[netip.Addr]*reverseEntry
-	order      []*netip.Addr // LRU order: oldest first
+	lruList    *list.List // P2-5: Doubly-linked list for O(1) removal
 	maxEntries int
 }
 
 type reverseEntry struct {
 	domain    string
 	expiresAt time.Time
+	element   *list.Element // P2-5: Pointer to list element for O(1) removal
 }
 
 // NewReverseMapping creates a new reverse mapping cache.
@@ -27,19 +30,21 @@ type reverseEntry struct {
 func NewReverseMapping(maxEntries int) *ReverseMapping {
 	return &ReverseMapping{
 		entries:    make(map[netip.Addr]*reverseEntry, maxEntries),
-		order:      make([]*netip.Addr, 0, maxEntries),
+		lruList:    list.New(), // P2-5: Initialize doubly-linked list
 		maxEntries: maxEntries,
 	}
 }
 
 // Store saves an IP→domain mapping with the given TTL.
+// P2-5: O(1) LRU update using doubly-linked list
 func (rm *ReverseMapping) Store(ip netip.Addr, domain string, ttl time.Duration) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
 	// Remove existing entry if present (will be re-added at end)
-	if _, exists := rm.entries[ip]; exists {
-		rm.removeOrder(ip)
+	if entry, exists := rm.entries[ip]; exists {
+		// P2-5: O(1) removal from list
+		rm.lruList.Remove(entry.element)
 	}
 
 	// Evict oldest if at capacity
@@ -47,11 +52,13 @@ func (rm *ReverseMapping) Store(ip netip.Addr, domain string, ttl time.Duration)
 		rm.evictOldest()
 	}
 
+	// P2-5: Add to back of list (most recently used)
+	elem := rm.lruList.PushBack(ip)
 	rm.entries[ip] = &reverseEntry{
 		domain:    domain,
 		expiresAt: time.Now().Add(ttl),
+		element:   elem,
 	}
-	rm.order = append(rm.order, &ip)
 }
 
 // Lookup returns the domain for the given IP.
@@ -68,7 +75,10 @@ func (rm *ReverseMapping) Lookup(ip netip.Addr) (string, bool) {
 	if time.Now().After(entry.expiresAt) {
 		rm.mu.Lock()
 		delete(rm.entries, ip)
-		rm.removeOrder(ip)
+		// P2-5: O(1) removal from list
+		if entry.element != nil {
+			rm.lruList.Remove(entry.element)
+		}
 		rm.mu.Unlock()
 		return "", false
 	}
@@ -175,26 +185,19 @@ func (rm *ReverseMapping) StoreDNSResponse(response []byte) {
 	}
 }
 
-// removeOrder removes an IP from the LRU order slice (caller must hold lock).
-func (rm *ReverseMapping) removeOrder(ip netip.Addr) {
-	for i, v := range rm.order {
-		if v != nil && *v == ip {
-			rm.order = append(rm.order[:i], rm.order[i+1:]...)
-			return
-		}
-	}
-}
-
 // evictOldest removes the oldest entry (caller must hold lock).
+// P2-5: O(1) eviction using doubly-linked list
 func (rm *ReverseMapping) evictOldest() {
-	if len(rm.order) == 0 {
+	if rm.lruList.Len() == 0 {
 		return
 	}
-	oldest := rm.order[0]
+	// Front of list is oldest (least recently used)
+	oldest := rm.lruList.Front()
 	if oldest != nil {
-		delete(rm.entries, *oldest)
+		ip := oldest.Value.(netip.Addr)
+		delete(rm.entries, ip)
+		rm.lruList.Remove(oldest)
 	}
-	rm.order = rm.order[1:]
 }
 
 // Clear removes all entries.
@@ -202,7 +205,7 @@ func (rm *ReverseMapping) Clear() {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	rm.entries = make(map[netip.Addr]*reverseEntry, rm.maxEntries)
-	rm.order = rm.order[:0]
+	rm.lruList = list.New() // P2-5: Reset list
 }
 
 // Size returns the current number of entries.

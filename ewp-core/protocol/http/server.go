@@ -25,6 +25,16 @@ type Request struct {
 	IsConnect   bool
 }
 
+// HandleConnection handles an incoming HTTP proxy connection
+// 
+// P2-10: Current implementation does NOT support HTTP/1.1 persistent connections (keep-alive).
+// Each request creates a new tunnel connection and closes it after the response.
+// This results in higher latency for multiple requests due to repeated connection establishment.
+// 
+// For better performance, consider:
+// - Using SOCKS5 proxy instead (better connection reuse)
+// - Using TUN mode (kernel-level connection pooling)
+// - See KEEPALIVE_TODO.md for future implementation plan
 func HandleConnection(conn net.Conn, reader *bufio.Reader, onConnect func(net.Conn, string) error, onProxy func(net.Conn, string, string) error) error {
 	clientAddr := conn.RemoteAddr().String()
 
@@ -33,9 +43,20 @@ func HandleConnection(conn net.Conn, reader *bufio.Reader, onConnect func(net.Co
 		return err
 	}
 
-	parts := strings.Fields(requestLine)
-	if len(parts) < 3 {
-		return fmt.Errorf("invalid HTTP request line")
+	// P2-9: Strict ABNF parsing - only accept single space (SP) as delimiter
+	// RFC 7230 defines request-line as: method SP request-target SP HTTP-version CRLF
+	// Using strings.Fields would accept tabs and multiple spaces, enabling HTTP smuggling
+	requestLine = strings.TrimRight(requestLine, "\r\n")
+	parts := strings.SplitN(requestLine, " ", 3)
+	if len(parts) != 3 {
+		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nMalformed request line\r\n"))
+		return fmt.Errorf("invalid HTTP request line: expected 3 parts, got %d", len(parts))
+	}
+	
+	// Additional validation: ensure no tabs or extra spaces
+	if strings.ContainsAny(parts[0], " \t") || strings.ContainsAny(parts[1], "\t") || strings.ContainsAny(parts[2], " \t") {
+		conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\nInvalid whitespace in request line\r\n"))
+		return fmt.Errorf("invalid HTTP request line: contains tabs or extra spaces")
 	}
 
 	req := &Request{

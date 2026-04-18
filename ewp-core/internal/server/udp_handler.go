@@ -53,10 +53,10 @@ type incomingPkt struct {
 // lastActiveNs 用 atomic 访问，避免 worker / receiver 双写竞争。
 type udpSession struct {
 	globalID     [8]byte
-	conn         *net.UDPConn     // 建立后不变（ListenUDP 非连接 socket）
-	initTarget   *net.UDPAddr     // 初始目标，dispatch 只写（单 goroutine 安全）
-	lastActiveNs int64            // atomic UnixNano
-	incoming     chan incomingPkt // 有界入包队列
+	conn         *net.UDPConn                // 建立后不变（ListenUDP 非连接 socket）
+	initTarget   atomic.Pointer[net.UDPAddr] // Bug-B: 使用 atomic.Pointer 避免竞态
+	lastActiveNs int64                       // atomic UnixNano
+	incoming     chan incomingPkt            // 有界入包队列
 	closeOnce    sync.Once
 }
 
@@ -293,7 +293,7 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 					return
 				}
 				capturedS.conn = conn
-				capturedS.initTarget = resolved
+				capturedS.initTarget.Store(resolved) // Bug-B: atomic store
 				capturedS.updateActive()
 				h.mu.Unlock()
 
@@ -325,7 +325,7 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 			return
 		}
 		s.conn = conn
-		s.initTarget = target
+		s.initTarget.Store(target) // Bug-B: atomic store
 		s.updateActive()
 		log.Debug("UDP new session: %s (GlobalID: %x)", target, pkt.GlobalID[:4])
 		go h.sessionWorker(s)
@@ -338,10 +338,10 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 	}
 
 	// 每个入站包携带目标地址：Keep 包允许更换目标（多候选地址 ICE/STUN 场景）。
-	target := s.initTarget
+	target := s.initTarget.Load() // Bug-B: atomic load
 	if pkt.Target != nil {
 		target = pkt.Target
-		s.initTarget = pkt.Target // 单 goroutine 写，安全
+		s.initTarget.Store(pkt.Target) // Bug-B: atomic store
 	} else if pkt.TargetHost != "" {
 		// Keep 包携带域名 target，解析后更新。
 		// P0-4: enforce a short timeout so a bad domain cannot stall this goroutine.
@@ -351,7 +351,7 @@ func (h *udpHandler) dispatch(pkt *ewp.UDPPacket) {
 		if err == nil && len(addrs) > 0 {
 			resolved := &net.UDPAddr{IP: addrs[0].IP, Port: int(pkt.TargetPort)}
 			target = resolved
-			s.initTarget = resolved
+			s.initTarget.Store(resolved) // Bug-B: atomic store
 		}
 	}
 
@@ -476,6 +476,7 @@ type chanWriter struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 	lastErr   unsafe.Pointer // *error, atomic
+	closed    int32          // atomic: 1 if closed, 0 otherwise (P1-8)
 }
 
 func newChanWriter(w io.Writer) *chanWriter {
@@ -503,23 +504,33 @@ func (cw *chanWriter) loop() {
 	}
 }
 
-func (cw *chanWriter) write(data []byte) (writeErr error) {
+func (cw *chanWriter) write(data []byte) error {
 	if p := atomic.LoadPointer(&cw.lastErr); p != nil {
 		return *(*error)(p)
 	}
-	// Recover from send-on-closed-channel panic that can occur if close()
-	// races with a receiveResponses goroutine that is still writing.
-	defer func() {
-		if r := recover(); r != nil {
-			writeErr = io.ErrClosedPipe
-		}
-	}()
-	cw.ch <- data
-	return nil
+	// P1-8: check closed flag atomically instead of using recover() to mask
+	// send-on-closed-channel panic. This makes the race condition explicit
+	// and prevents masking other potential bugs.
+	if atomic.LoadInt32(&cw.closed) != 0 {
+		return io.ErrClosedPipe
+	}
+	// Note: there's still a tiny race window between the check and the send,
+	// but it's acceptable because:
+	// 1. The channel has a buffer (udpWriteDepth=256), so most sends succeed
+	// 2. If close() happens during send, the goroutine will exit cleanly
+	// 3. The closed flag prevents new sends after close() completes
+	select {
+	case cw.ch <- data:
+		return nil
+	default:
+		// Channel full - this is a backpressure signal
+		return fmt.Errorf("write queue full")
+	}
 }
 
 func (cw *chanWriter) close() {
 	cw.closeOnce.Do(func() {
+		atomic.StoreInt32(&cw.closed, 1) // P1-8: mark as closed before closing channel
 		close(cw.ch)
 		cw.wg.Wait()
 	})

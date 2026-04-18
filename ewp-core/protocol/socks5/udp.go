@@ -149,7 +149,8 @@ func HandleUDPAssociate(
 	stopChan := make(chan struct{})
 	var lastSenderAddr atomic.Pointer[net.UDPAddr]
 
-	go relayUDPLoop(udpConn, clientAddr, clientIP, stopChan, dnsHandler, dialFn, sessions, &lastSenderAddr)
+	// P1-22: Pass 0 as clientPort initially - will be learned from first packet
+	go relayUDPLoop(udpConn, clientAddr, clientIP, 0, stopChan, dnsHandler, dialFn, sessions, &lastSenderAddr)
 
 	// Block until the control TCP connection is closed (any read/error).
 	tcpConn.SetReadDeadline(time.Time{})
@@ -176,6 +177,7 @@ func relayUDPLoop(
 	udpConn *net.UDPConn,
 	clientAddr string,
 	clientIP net.IP,
+	clientPort int, // P1-22: expected client UDP source port (0 = learn from first packet)
 	stopChan chan struct{},
 	dnsHandler func([]byte) ([]byte, error),
 	dialFn func() (transport.TunnelConn, error),
@@ -187,6 +189,9 @@ func relayUDPLoop(
 
 	buf := commpool.GetUDP()
 	defer commpool.PutUDP(buf)
+	
+	// P1-22: Learn client port from first valid packet
+	learnedPort := clientPort
 
 	for {
 		select {
@@ -207,10 +212,21 @@ func relayUDPLoop(
 			return
 		}
 
-		// Source validation: only accept packets from the client that initiated ASSOCIATE.
-		if clientIP != nil && !senderAddr.IP.Equal(clientIP) {
-			log.V("[UDP] %s rejected packet from unexpected source %s", clientAddr, senderAddr)
-			continue
+		// P1-22: Source validation per RFC 1928 - only accept packets from the
+		// client (IP, port) that initiated ASSOCIATE. This prevents other local
+		// processes from hijacking the UDP relay by spoofing the source IP.
+		if clientIP != nil {
+			// Learn port from first packet if not yet set
+			if learnedPort == 0 {
+				learnedPort = senderAddr.Port
+				log.V("[UDP] %s learned client UDP port: %d", clientAddr, learnedPort)
+			}
+			
+			if !senderAddr.IP.Equal(clientIP) || senderAddr.Port != learnedPort {
+				log.V("[UDP] %s rejected packet from unexpected source %s (expected %s:%d)", 
+					clientAddr, senderAddr, clientIP, learnedPort)
+				continue
+			}
 		}
 
 		if n < 10 {

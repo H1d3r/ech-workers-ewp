@@ -95,6 +95,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # P2-35: Validate Gradle Wrapper for supply chain security
+      - name: Validate Gradle Wrapper
+        uses: gradle/wrapper-validation-action@v2
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -123,7 +127,8 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.5'
+          # P2-35: Pin specific Gradle version for stability
+          gradle-version: '8.5.0'
 
       - name: Build APK
         working-directory: ewp-android
@@ -150,6 +155,28 @@ jobs:
             ! -name "*unsigned*" \
             -exec cp {} apk-output/ \;
           ls -lh apk-output/
+
+      # P2-26: Verify release APK doesn't contain test manifest
+      - name: Verify Release APK (No Test Manifest)
+        if: hashFiles('apk-output/app-release.apk') != ''
+        run: |
+          echo "=== Verifying release APK doesn't contain test manifest ==="
+          RELEASE_APK="apk-output/app-release.apk"
+          
+          # Check for test-related classes
+          if unzip -l "$RELEASE_APK" | grep -i "test"; then
+            echo "❌ ERROR: Release APK contains test-related files!"
+            unzip -l "$RELEASE_APK" | grep -i "test"
+            exit 1
+          fi
+          
+          # Check for ui-test-manifest specifically
+          if unzip -l "$RELEASE_APK" | grep -i "ui-test-manifest"; then
+            echo "❌ ERROR: Release APK contains ui-test-manifest!"
+            exit 1
+          fi
+          
+          echo "✅ Release APK verification passed: No test manifest found"
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
