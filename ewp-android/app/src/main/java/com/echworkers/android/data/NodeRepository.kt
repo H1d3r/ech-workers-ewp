@@ -137,8 +137,6 @@ class NodeRepository(context: Context) {
     private fun saveSelectedNodeId(nodeId: String?) {
         prefs.edit().putString(KEY_SELECTED_NODE_ID, nodeId).apply()
     }
-}
-
     
     /**
      * P1-25: Migrate data from old plain SharedPreferences to encrypted storage.
@@ -184,3 +182,4 @@ class NodeRepository(context: Context) {
             Log.e(TAG, "Migration failed, will retry on next launch", e)
         }
     }
+}
