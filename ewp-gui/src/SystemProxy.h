@@ -23,7 +23,7 @@ private:
     // P2-34: Save original proxy state for restoration
     struct OriginalProxyState {
         bool saved = false;
-        DWORD flags = 0;
+        quint32 flags = 0;
         QString proxyServer;
         QString proxyBypass;
         QString autoConfigUrl;

@@ -128,7 +128,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
         with:
           # P2-35: Pin specific Gradle version for stability
-          gradle-version: '8.5.0'
+          gradle-version: '8.5'
 
       - name: Build APK
         working-directory: ewp-android
