@@ -124,6 +124,18 @@ func (h *Handler) HandleTCP(conn *gonet.TCPConn) {
 // It reuses one tunSocket per (src,dst) so multiple datagrams of the
 // same flow end up on the same engine.UDPConn (and therefore the
 // same outbound sub-session).
+//
+// Two short-circuits run before the engine sees anything:
+//
+//  1. FakeIP DNS interception: if the dst port is 53 and we have a
+//     FakeIP pool installed, decode the query, allocate a fake A/AAAA,
+//     synthesize a response, write it straight back through the gVisor
+//     conn, and DROP the packet. The DNS query never leaves the
+//     device — sub-millisecond latency, zero tunnel traffic.
+//
+//  2. (everything else) the packet enters the per-(src,dst) tunSocket
+//     and is delivered to the bound engine.InboundHandler, which the
+//     router forwards to an outbound (typically ewpclient).
 func (h *Handler) HandleUDP(conn udpResponseWriter, payload []byte, src netip.AddrPort, dst netip.AddrPort) {
 	h.mu.RLock()
 	eng := h.engine
@@ -131,6 +143,20 @@ func (h *Handler) HandleUDP(conn udpResponseWriter, payload []byte, src netip.Ad
 	h.mu.RUnlock()
 	if eng == nil {
 		return
+	}
+
+	// 1. FakeIP DNS short-circuit.
+	if pool != nil && dst.Port() == 53 {
+		if domain := dns.ParseDNSName(payload); domain != "" {
+			v4 := pool.AllocateIPv4(domain)
+			v6 := pool.AllocateIPv6(domain)
+			if resp := dns.BuildDNSResponse(payload, v4, v6); resp != nil {
+				udpAddr := &net.UDPAddr{IP: dst.Addr().AsSlice(), Port: int(dst.Port())}
+				_, _ = conn.WriteTo(resp, udpAddr)
+				return
+			}
+		}
+		// fall through if we cannot answer — let the engine carry it
 	}
 
 	srcEP := engine.Endpoint{Addr: src, Port: src.Port()}
