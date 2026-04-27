@@ -27,23 +27,29 @@ Thumbs.db
 # Go build artifacts — never commit binaries
 # (cleaned 197MB → 1.8MB by git-filter-repo on 2026-04-27;
 #  any pattern below is a learned mistake from v1 history)
+# Match only repo-root binaries, not paths containing these names!
+# (the ewp-core/ source tree has thousands of files matching ewp-*)
 *.exe
 *.out
-*.test
-ech-workers
-ech-workers-*
-proxy-server
-proxy-server-*
-ewp-server
-ewp-client
-ewp                       # cmd/ewp v2 binary
-ewp-*
-*-linux
-*-macos
-*-windows
-*-darwin
-*-freebsd
-test-*
+/ech-workers
+/ech-workers-*
+/proxy-server
+/proxy-server-*
+/ewp-server
+/ewp-client
+/ewp                       # cmd/ewp v2 binary
+/ewp-server-*
+/ewp-client-*
+/ewp-relay
+/ewp-cli
+/*-linux
+/*-macos
+/*-windows
+/*-darwin
+/*-freebsd
+/test-*
+**/cmd/*/ewp                # cmd/ewp/ewp binary inside subdirs
+**/cmd/*/test-*
 
 # Backup directories created by git-filter-repo or manual rm
 .git.bak
