@@ -25,17 +25,29 @@ tickets/
 Thumbs.db
 
 # Go build artifacts — never commit binaries
+# (cleaned 197MB → 1.8MB by git-filter-repo on 2026-04-27;
+#  any pattern below is a learned mistake from v1 history)
 *.exe
 *.out
+*.test
 ech-workers
 ech-workers-*
 proxy-server
 proxy-server-*
 ewp-server
 ewp-client
+ewp                       # cmd/ewp v2 binary
+ewp-*
 *-linux
 *-macos
 *-windows
+*-darwin
+*-freebsd
+test-*
+
+# Backup directories created by git-filter-repo or manual rm
+.git.bak
+.git.bak-*
 
 # DLL files (except wintun.dll which is a required runtime dependency)
 *.dll

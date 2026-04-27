@@ -1,0 +1,33 @@
+# Relay node: terminate EWP from upstream client, forward through
+# another EWP tunnel to a downstream server. Useful for double-hop
+# deployments or for deploying a "front" node on a CDN where the
+# real exit is elsewhere.
+
+inbounds:
+  - tag: ewp-in
+    type: ewpserver
+    uuids:
+      - "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+    transport:
+      kind: websocket
+      url: "0.0.0.0:443"
+      path: "/ewp"
+      cert: "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
+      key:  "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+
+outbounds:
+  - tag: next-hop
+    type: ewpclient
+    uuid: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
+    transport:
+      kind: websocket
+      url: "wss://exit.example.com/ewp"
+      sni: "exit.example.com"
+      ech: true
+
+router:
+  default: next-hop
+
+ech:
+  bootstrap_doh:
+    servers: ["https://1.1.1.1/dns-query"]

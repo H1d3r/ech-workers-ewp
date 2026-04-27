@@ -1,0 +1,19 @@
+# Local HTTP CONNECT proxy on 127.0.0.1:8118 forwarding through EWP.
+
+inbounds:
+  - tag: local-http
+    type: http
+    listen: "127.0.0.1:8118"
+
+outbounds:
+  - tag: my-vps
+    type: ewpclient
+    uuid: "01020304-0506-0708-090a-0b0c0d0e0f10"
+    transport:
+      kind: h3grpc            # HTTP/3 + grpc-web framing for hard-to-block environments
+      url: "https://example.com/ewp"
+      sni: "example.com"
+      ech: true
+
+router:
+  default: my-vps

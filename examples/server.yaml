@@ -1,0 +1,33 @@
+# Typical VPS server: terminate EWP over WebSocket+TLS, exit to the
+# real internet via direct outbound. All DOMAIN targets requested by
+# clients are resolved through DoH (cached, never the box's ISP DNS).
+
+inbounds:
+  - tag: ewp-in
+    type: ewpserver
+    uuids:
+      - "01020304-0506-0708-090a-0b0c0d0e0f10"
+    transport:
+      kind: websocket
+      url: "0.0.0.0:443"
+      path: "/ewp"
+      cert: "/etc/letsencrypt/live/example.com/fullchain.pem"
+      key:  "/etc/letsencrypt/live/example.com/privkey.pem"
+
+outbounds:
+  - tag: out
+    type: direct
+
+router:
+  default: out
+
+dns:
+  server:
+    upstream:
+      servers:
+        - "https://1.1.1.1/dns-query"
+        - "https://dns.google/dns-query"
+      cache_size: 16384
+      worker_pool: 16
+      min_ttl_sec: 30
+      max_ttl_sec: 3600
