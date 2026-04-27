@@ -8,7 +8,6 @@ import (
 
 	"ewp-core/engine"
 	"ewp-core/inbound/ewpserver"
-	"ewp-core/transport"
 )
 
 // buildEWPServerInbound constructs an ewpserver.Inbound from a YAML
@@ -37,9 +36,7 @@ func buildEWPServerInbound(c InboundCfg) (engine.Inbound, error) {
 		path = "/"
 	}
 	uuids16 := make([][16]byte, len(uuids))
-	for i, u := range uuids {
-		uuids16[i] = u
-	}
+	copy(uuids16, uuids)
 
 	var ln ewpserver.Listener
 	switch c.Transport.Kind {
@@ -83,52 +80,6 @@ func buildServerTLSConfig(t TransportCfg) (*tls.Config, error) {
 	return cfg, nil
 }
 
-// wsAdapter is an internal Listener that wraps the package-private
-// run-loop semantics of ewpserver.WSListenerAdapter without forcing
-// cfg/ to import implementation details.
-type wsAdapter struct {
-	listen string
-	path   string
-	tlsCfg *tls.Config
-
-	// Filled in on first Accept() to defer construction until
-	// Inbound.Start runs (i.e. after the engine is wired).
-	inner ewpserverListener
-}
-
-// ewpserverListener is the same as ewpserver.Listener but kept
-// private here.
-type ewpserverListener interface {
-	Accept() (transport.TunnelConn, error)
-	Close() error
-	Addr() string
-}
-
-func newWSAdapter(listen, path string, tlsCfg *tls.Config) *wsAdapter {
-	return &wsAdapter{listen: listen, path: path, tlsCfg: tlsCfg}
-}
-
-// Accept lazily creates and starts the underlying WSListener on
-// first call so we can defer all socket binding until the engine has
-// invoked Start.
-func (a *wsAdapter) Accept() (transport.TunnelConn, error) {
-	if a.inner == nil {
-		ad := ewpserver.NewWSListenerWithTLS(a.listen, a.path, a.tlsCfg)
-		a.inner = ad
-	}
-	return a.inner.Accept()
-}
-
-func (a *wsAdapter) Close() error {
-	if a.inner != nil {
-		return a.inner.Close()
-	}
-	return nil
-}
-
-func (a *wsAdapter) Addr() string {
-	if a.tlsCfg != nil {
-		return "wss://" + a.listen + a.path
-	}
-	return "ws://" + a.listen + a.path
-}
+// (wsAdapter / ewpserverListener / newWSAdapter were removed: they
+// were superseded by direct use of ewpserver.NewWSListenerWithTLS
+// from buildEWPServerInbound and never referenced.)

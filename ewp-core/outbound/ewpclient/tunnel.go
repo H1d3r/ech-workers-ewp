@@ -198,10 +198,8 @@ func (s *udpSub) Probe() (v2.Address, error) {
 	if err := s.tunnel.ss.SendProbeReq(s.gid); err != nil {
 		return v2.Address{}, err
 	}
-	select {
-	case <-s.closeCh:
-		return v2.Address{}, io.ErrClosedPipe
-	}
+	<-s.closeCh
+	return v2.Address{}, io.ErrClosedPipe
 }
 
 func (s *udpSub) Close() error {

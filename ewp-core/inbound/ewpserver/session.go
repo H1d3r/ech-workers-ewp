@@ -38,8 +38,7 @@ type serverSession struct {
 	// (the wire spec: Command set at handshake time). For TCP we
 	// build a streamConn pair and call engine.HandleTCP exactly
 	// once; subsequent TCP_DATA frames flow through the streamConn.
-	tcpOnce sync.Once
-	tcp     *streamConn
+	tcp *streamConn
 
 	// reflexiveProvider is wired by the parent Inbound; called on
 	// every UDP_PROBE_REQ to learn the publicly-observable address

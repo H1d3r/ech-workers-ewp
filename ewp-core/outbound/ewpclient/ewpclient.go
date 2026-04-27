@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/netip"
 	"sync"
 
 	"ewp-core/engine"
@@ -289,11 +288,6 @@ func WithUDPSource(parent context.Context, src engine.Endpoint) context.Context 
 func UDPSourceFromContext(ctx context.Context) (engine.Endpoint, bool) {
 	v, ok := ctx.Value(ctxKeyUDPSrc{}).(engine.Endpoint)
 	return v, ok
-}
-
-// nolint:unused — exposed for potential STUN diagnostics tooling.
-func sentinelAddr() netip.AddrPort {
-	return netip.AddrPort{}
 }
 
 // log helper – prevents unused import on logger-less builds.

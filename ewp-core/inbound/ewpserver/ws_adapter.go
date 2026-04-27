@@ -33,8 +33,6 @@ func NewWS(tag, listen, path string, tlsCfg interface{}, uuids [][16]byte) (*Inb
 		errCh: make(chan error, 1),
 		addr:  fmt.Sprintf("ws://%s%s", listen, path),
 	}
-	tc, _ := tlsCfg.(interface{}) // typed cast happens in caller; we just pass through
-	_ = tc
 	ad.ws = NewWSListener(listen, path, nil)
 	if t, ok := tlsCfg.(interface{ TLSConfig() }); ok {
 		_ = t // future hook if we add typed wrappers
@@ -51,10 +49,6 @@ func NewWS(tag, listen, path string, tlsCfg interface{}, uuids [][16]byte) (*Inb
 // so that the package can be used in test rigs without a TLS
 // configuration. The runtime check is done with a type assertion.
 //
-// (Yes, this is slightly clunky; once we have a stable
-// commontls.NewServer API the assertion can go away.)
-type tlsConfigSetter interface{ setTLS(any) }
-
 // SetTLS configures the underlying WSListener's TLS context.
 // Pass *tls.Config; nil = plaintext.
 func (a *WSListenerAdapter) SetTLS(cfg any) {

@@ -145,9 +145,8 @@ type udpAdapter struct {
 	defaultRemote *net.UDPAddr
 	resolver      *dns.AsyncResolver
 
-	closeOnce sync.Once
-	closed    bool
-	closeMu   sync.Mutex
+	closed  bool
+	closeMu sync.Mutex
 }
 
 // WriteTo sends a payload to the supplied destination. Per-frame
