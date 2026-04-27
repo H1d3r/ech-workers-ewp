@@ -193,6 +193,105 @@ func TestBuildAsyncResolver(t *testing.T) {
 	_ = r.Close()
 }
 
+// TestApplyClientDoHDefaults_AllEmpty: when no DoH is configured
+// anywhere, the built-in default (cn-mainland-friendly) fills both
+// ech.bootstrap_doh and server_name_dns.
+func TestApplyClientDoHDefaults_AllEmpty(t *testing.T) {
+	cfg := writeTemp(t, "minimal.yaml", `
+inbounds:
+  - tag: socks
+    type: socks5
+    listen: "127.0.0.1:1080"
+outbounds:
+  - tag: out
+    type: direct
+`)
+	f, err := Load(cfg)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !sameStrSlice(f.ECH.BootstrapDoH.Servers, DefaultClientDoH) {
+		t.Errorf("ech.bootstrap_doh.servers not defaulted: %v", f.ECH.BootstrapDoH.Servers)
+	}
+	if !sameStrSlice(f.ServerNameDNS.DoH.Servers, DefaultClientDoH) {
+		t.Errorf("server_name_dns.doh.servers not defaulted: %v", f.ServerNameDNS.DoH.Servers)
+	}
+}
+
+// TestApplyClientDoHDefaults_ClientUmbrella: f.Client.DoH.Servers
+// overrides the built-in default and propagates into the two leaves.
+func TestApplyClientDoHDefaults_ClientUmbrella(t *testing.T) {
+	cfg := writeTemp(t, "umbrella.yaml", `
+inbounds:
+  - tag: socks
+    type: socks5
+    listen: "127.0.0.1:1080"
+outbounds:
+  - tag: out
+    type: direct
+client:
+  doh:
+    servers:
+      - "https://my-private-doh/dns-query"
+`)
+	f, err := Load(cfg)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"https://my-private-doh/dns-query"}
+	if !sameStrSlice(f.ECH.BootstrapDoH.Servers, want) {
+		t.Errorf("bootstrap not from umbrella: %v", f.ECH.BootstrapDoH.Servers)
+	}
+	if !sameStrSlice(f.ServerNameDNS.DoH.Servers, want) {
+		t.Errorf("server_name_dns not from umbrella: %v", f.ServerNameDNS.DoH.Servers)
+	}
+}
+
+// TestApplyClientDoHDefaults_LeafOverridesUmbrella: an explicit leaf
+// block wins over both client.doh and DefaultClientDoH.
+func TestApplyClientDoHDefaults_LeafOverridesUmbrella(t *testing.T) {
+	cfg := writeTemp(t, "leaf.yaml", `
+inbounds:
+  - tag: socks
+    type: socks5
+    listen: "127.0.0.1:1080"
+outbounds:
+  - tag: out
+    type: direct
+client:
+  doh:
+    servers:
+      - "https://umbrella/dns-query"
+ech:
+  bootstrap_doh:
+    servers:
+      - "https://only-for-ech/dns-query"
+`)
+	f, err := Load(cfg)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := f.ECH.BootstrapDoH.Servers; len(got) != 1 || got[0] != "https://only-for-ech/dns-query" {
+		t.Errorf("ech leaf not preserved: %v", got)
+	}
+	// server_name_dns still falls back to umbrella because it was empty.
+	if got := f.ServerNameDNS.DoH.Servers; len(got) != 1 || got[0] != "https://umbrella/dns-query" {
+		t.Errorf("server_name_dns should default to umbrella: %v", got)
+	}
+}
+
+func sameStrSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func writeTemp(t *testing.T, name, content string) string {
 	t.Helper()
 	dir := t.TempDir()
