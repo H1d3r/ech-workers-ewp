@@ -143,6 +143,20 @@ func (vm *vpnManager) Start(tunFD int, cfg *VPNConfig) error {
 		ServerAddr:       cfg.ServerAddr,
 		BypassDoHServers: dohServers,
 		OnBypass: func(b *transport.BypassConfig) {
+			// On Android we wrap the bypass dialer's syscall.Control
+			// hook so each TCP connect / UDP listen we make goes
+			// through VpnService.protect(fd). Without this the
+			// outbound's own packets get re-captured by the TUN
+			// device and we hit infinite recursion + battery drain.
+			//
+			// The hook is best-effort: if no SocketProtector has
+			// been registered (Kotlin side hasn't called
+			// SetSocketProtector yet), we keep the unprotected
+			// dialer rather than fail closed — letting the user at
+			// least see the routing-loop log line.
+			if IsSocketProtectorSet() {
+				b = wrapBypassWithProtector(b)
+			}
 			tr.SetBypassConfig(b)
 		},
 	}
