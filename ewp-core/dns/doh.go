@@ -58,11 +58,12 @@ func NewClientWithDialer(serverURL string, dialer *net.Dialer) *Client {
 
 	serverName := u.Hostname()
 
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		NextProtos: []string{"h2"},
-		ServerName: serverName,
-	}
+	// Use the hardened DoH TLS config: TLS 1.3 minimum, embedded
+	// Mozilla bundle (so the system CA store can't be tampered with
+	// by enterprise MITM proxies), no session cache (would defeat
+	// the whole point of bootstrap DoH if a stale session were
+	// re-used by a different server). See dns/doh_tls.go.
+	tlsConfig := dohTLSConfig(serverName)
 
 	d := dialer
 	transport := &http2.Transport{
