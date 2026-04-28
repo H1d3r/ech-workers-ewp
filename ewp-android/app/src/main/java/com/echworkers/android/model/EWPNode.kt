@@ -3,84 +3,65 @@ package com.echworkers.android.model
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
+/**
+ * EWP v2 node configuration. Backward-incompatible with v1: trojan,
+ * flow padding, PQC opt-in, TLS-version selection, xhttp stream-down,
+ * userAgent / contentType injection — all gone. v2 mandates EWP +
+ * TLS 1.3 + ML-KEM-768 + ECH always-on if available.
+ *
+ * Existing v1 node lists in app storage are NOT migrated. Users will
+ * need to re-create their nodes; this is a deliberate trade-off in
+ * exchange for not carrying v1's design mistakes forward.
+ */
 @Serializable
 data class EWPNode(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
+
     val serverAddress: String,
     val serverPort: Int = 443,
-    
-    val appProtocol: AppProtocol = AppProtocol.EWP,
+
+    /** EWP token; hex 32 chars (16 bytes). */
     val uuid: String = "",
-    val password: String = "",
-    
+
+    /** Outer transport selector. */
     val transportMode: TransportMode = TransportMode.WS,
-    val wsPath: String = "/",
+    val wsPath: String = "/ewp",
     val grpcServiceName: String = "ProxyService",
     val xhttpPath: String = "/xhttp",
-    val xhttpMode: String = "auto",
-    val userAgent: String = "",
-    val contentType: String = "",
-    
+
+    /** HTTP Host header / gRPC :authority. Empty -> derive from serverAddress. */
     val host: String = "",
+    /** TLS SNI. Empty -> derive from serverAddress (or fall back to host). */
     val sni: String = "",
-    
-    val enableTLS: Boolean = true,
-    val minTLSVersion: String = "1.2",
-    
+
+    /** Encrypted ClientHello toggle. v2 strongly recommends keeping it on. */
     val enableECH: Boolean = true,
-    val echDomain: String = "cloudflare-ech.com",
-    val dnsServer: String = "223.5.5.5/dns-query",  // Aliyun DNS (China-friendly)
-    
-    val enableFlow: Boolean = true,
-    val enablePQC: Boolean = false,
-    val enableMozillaCA: Boolean = true,
-    
-    val latency: Int = 0
+
+    /** Optional override of the umbrella DoH list used by ewpmobile. Comma-separated. Empty -> built-in default (AliDNS + DNSPod). */
+    val dohServers: String = "",
+
+    val latency: Int = 0,
 ) {
     @Serializable
-    enum class AppProtocol {
-        EWP, TROJAN
+    enum class TransportMode { WS, GRPC, XHTTP, H3GRPC }
+
+    fun isValid(): Boolean = serverAddress.isNotBlank() && uuid.isNotBlank()
+
+    fun displayType(): String = "EWP-" + when (transportMode) {
+        TransportMode.WS    -> "WS"
+        TransportMode.GRPC  -> "gRPC"
+        TransportMode.XHTTP -> "XHTTP"
+        TransportMode.H3GRPC -> "H3"
     }
-    
-    @Serializable
-    enum class TransportMode {
-        WS, GRPC, XHTTP, H3GRPC
-    }
-    
-    fun isValid(): Boolean {
-        return serverAddress.isNotEmpty() && when (appProtocol) {
-            AppProtocol.EWP -> uuid.isNotEmpty()
-            AppProtocol.TROJAN -> password.isNotEmpty()
-        }
-    }
-    
-    fun displayType(): String {
-        val prefix = if (appProtocol == AppProtocol.TROJAN) "Trojan" else "EWP"
-        val transport = when (transportMode) {
-            TransportMode.WS -> "WS"
-            TransportMode.GRPC -> "gRPC"
-            TransportMode.XHTTP -> "XHTTP"
-            TransportMode.H3GRPC -> "H3"
-        }
-        return "$prefix-$transport"
-    }
-    
+
     fun displayAddress(): String = "$serverAddress:$serverPort"
-    
+
     fun displayLatency(): String = when {
         latency < 0 -> "失败"
         latency == 0 -> "-"
         else -> "${latency}ms"
     }
-    
-    fun displayAuth(): String {
-        return when (appProtocol) {
-            AppProtocol.TROJAN -> {
-                if (password.length <= 4) "****"
-                else "${password.take(2)}****${password.takeLast(2)}"
-            }
-            AppProtocol.EWP -> "${uuid.take(8)}..."
-        }
-    }
+
+    fun displayAuth(): String = if (uuid.length >= 8) "${uuid.take(8)}..." else "----"
 }

@@ -58,3 +58,16 @@ Thumbs.db
 # DLL files (except wintun.dll which is a required runtime dependency)
 *.dll
 !ewp-core/wintun.dll
+
+# Build artefacts (CMake / Gradle / gomobile)
+**/build/
+**/.gradle/
+**/local.properties
+**/*.aar
+!ewp-android/app/libs/.gitkeep
+ewp-core/output/
+
+# IDE
+.idea/
+.vscode/
+*.iml

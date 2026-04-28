@@ -12,18 +12,26 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.echworkers.android.model.EWPNode
 import com.echworkers.android.viewmodel.MainViewModel
-import java.util.UUID
 
+/**
+ * v2 node editor.
+ *
+ * The 12 v1 fields (appProtocol, password, xhttpMode, userAgent,
+ * contentType, enableTLS, minTLSVersion, echDomain, dnsServer,
+ * enableFlow, enablePQC, enableMozillaCA) are gone — v2 mandates
+ * EWP + TLS 1.3 + ML-KEM-768 + Mozilla CA + ECH-when-available
+ * with no opt-out. Less surface = fewer ways for users to weaken
+ * their own security.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NodeEditScreen(
     viewModel: MainViewModel,
     nodeId: String?,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
 ) {
     val existingNode = nodeId?.let { id ->
         viewModel.nodes.collectAsState().value.find { it.id == id }
@@ -33,446 +41,189 @@ fun NodeEditScreen(
     var serverAddress by remember { mutableStateOf(existingNode?.serverAddress ?: "") }
     var serverPort by remember { mutableStateOf(existingNode?.serverPort?.toString() ?: "443") }
     var host by remember { mutableStateOf(existingNode?.host ?: "") }
+    var sni by remember { mutableStateOf(existingNode?.sni ?: "") }
 
-    var appProtocol by remember { mutableStateOf(existingNode?.appProtocol ?: EWPNode.AppProtocol.EWP) }
     var uuid by remember { mutableStateOf(existingNode?.uuid ?: "") }
-    var password by remember { mutableStateOf(existingNode?.password ?: "") }
 
     var transportMode by remember { mutableStateOf(existingNode?.transportMode ?: EWPNode.TransportMode.WS) }
-    var wsPath by remember { mutableStateOf(existingNode?.wsPath ?: "/") }
+    var wsPath by remember { mutableStateOf(existingNode?.wsPath ?: "/ewp") }
     var grpcServiceName by remember { mutableStateOf(existingNode?.grpcServiceName ?: "ProxyService") }
     var xhttpPath by remember { mutableStateOf(existingNode?.xhttpPath ?: "/xhttp") }
-    var xhttpMode by remember { mutableStateOf(existingNode?.xhttpMode ?: "auto") }
-    var userAgent by remember { mutableStateOf(existingNode?.userAgent ?: "") }
-    var contentType by remember { mutableStateOf(existingNode?.contentType ?: "") }
-
-    var enableTLS by remember { mutableStateOf(existingNode?.enableTLS ?: true) }
-    var sni by remember { mutableStateOf(existingNode?.sni ?: "") }
-    var minTLSVersion by remember { mutableStateOf(existingNode?.minTLSVersion ?: "1.2") }
 
     var enableECH by remember { mutableStateOf(existingNode?.enableECH ?: true) }
-    var echDomain by remember { mutableStateOf(existingNode?.echDomain ?: "cloudflare-ech.com") }
-    var dnsServer by remember { mutableStateOf(existingNode?.dnsServer ?: "223.5.5.5/dns-query") }
+    var dohServers by remember { mutableStateOf(existingNode?.dohServers ?: "") }
 
-    var enablePQC by remember { mutableStateOf(existingNode?.enablePQC ?: false) }
-    var enableFlow by remember { mutableStateOf(existingNode?.enableFlow ?: true) }
-    var enableMozillaCA by remember { mutableStateOf(existingNode?.enableMozillaCA ?: true) }
-
-    val isValid = name.isNotBlank() && serverAddress.isNotBlank() &&
-            (appProtocol == EWPNode.AppProtocol.TROJAN && password.isNotBlank() ||
-                    appProtocol == EWPNode.AppProtocol.EWP && uuid.isNotBlank())
+    val canSave = name.isNotBlank() &&
+        serverAddress.isNotBlank() &&
+        uuid.isNotBlank()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (nodeId == null) "添加节点" else "编辑节点") },
+                title = { Text(if (existingNode == null) "新建节点" else "编辑节点") },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.Default.ArrowBack, "返回")
+                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
                     TextButton(
+                        enabled = canSave,
                         onClick = {
                             val node = EWPNode(
-                                id = existingNode?.id ?: UUID.randomUUID().toString(),
+                                id = existingNode?.id ?: java.util.UUID.randomUUID().toString(),
                                 name = name,
                                 serverAddress = serverAddress,
                                 serverPort = serverPort.toIntOrNull() ?: 443,
-                                host = host,
-                                appProtocol = appProtocol,
                                 uuid = uuid,
-                                password = password,
                                 transportMode = transportMode,
                                 wsPath = wsPath,
                                 grpcServiceName = grpcServiceName,
                                 xhttpPath = xhttpPath,
-                                xhttpMode = xhttpMode,
-                                userAgent = userAgent,
-                                contentType = contentType,
+                                host = host,
                                 sni = sni,
-                                enableTLS = enableTLS,
-                                minTLSVersion = minTLSVersion,
                                 enableECH = enableECH,
-                                echDomain = echDomain,
-                                dnsServer = dnsServer,
-                                enableFlow = enableFlow,
-                                enablePQC = enablePQC,
-                                enableMozillaCA = enableMozillaCA
+                                dohServers = dohServers,
                             )
-                            if (existingNode == null) viewModel.addNode(node)
-                            else viewModel.updateNode(node)
+                            if (existingNode == null) {
+                                viewModel.addNode(node)
+                            } else {
+                                viewModel.updateNode(node)
+                            }
                             onNavigateBack()
                         },
-                        enabled = isValid
-                    ) {
-                        Text("保存")
-                    }
-                }
+                    ) { Text("保存") }
+                },
             )
         }
     ) { padding ->
         Column(
             modifier = Modifier
-                .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-
-            // ── 基本配置 ──────────────────────────────────────────────
-            ConfigCard(title = "基本配置") {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("名称") },
-                    placeholder = { Text("节点名称") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = serverAddress,
-                        onValueChange = { serverAddress = it },
-                        label = { Text("服务器地址") },
-                        placeholder = { Text("IP 或域名（实际连接目标）") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = serverPort,
-                        onValueChange = { serverPort = it },
-                        label = { Text("端口") },
-                        modifier = Modifier.width(90.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true
-                    )
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                DropdownRow(
-                    label = "应用协议",
-                    options = listOf("EWP（默认）", "Trojan"),
-                    selectedIndex = if (appProtocol == EWPNode.AppProtocol.EWP) 0 else 1,
-                    onSelectionChange = {
-                        appProtocol = if (it == 0) EWPNode.AppProtocol.EWP else EWPNode.AppProtocol.TROJAN
-                    }
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                when (appProtocol) {
-                    EWPNode.AppProtocol.EWP -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            OutlinedTextField(
-                                value = uuid,
-                                onValueChange = { uuid = it },
-                                label = { Text("UUID") },
-                                placeholder = { Text("EWP 认证令牌（与服务端一致）") },
-                                modifier = Modifier.weight(1f),
-                                singleLine = true
-                            )
-                            IconButton(onClick = { uuid = UUID.randomUUID().toString() }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "生成 UUID")
-                            }
-                        }
-                    }
-                    EWPNode.AppProtocol.TROJAN -> {
-                        OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Trojan 密码") },
-                            modifier = Modifier.fillMaxWidth(),
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true
-                        )
-                    }
-                }
-            }
-
-            // ── 高级配置 (EWP) ────────────────────────────────────────
-            if (appProtocol == EWPNode.AppProtocol.EWP) {
-                ConfigCard(title = "高级配置 (EWP)") {
-                    SwitchRow("Vision 流控", "启用流量混淆和零拷贝优化", enableFlow) { enableFlow = it }
-                }
-            }
-
-            // ── 传输配置 ──────────────────────────────────────────────
-            ConfigCard(title = "传输配置") {
-                DropdownRow(
-                    label = "传输协议",
-                    options = listOf("WebSocket", "gRPC (HTTP/2)", "XHTTP", "H3gRPC (HTTP/3)"),
-                    selectedIndex = when (transportMode) {
-                        EWPNode.TransportMode.WS -> 0
-                        EWPNode.TransportMode.GRPC -> 1
-                        EWPNode.TransportMode.XHTTP -> 2
-                        EWPNode.TransportMode.H3GRPC -> 3
-                    },
-                    onSelectionChange = {
-                        transportMode = when (it) {
-                            0 -> EWPNode.TransportMode.WS
-                            1 -> EWPNode.TransportMode.GRPC
-                            2 -> EWPNode.TransportMode.XHTTP
-                            else -> EWPNode.TransportMode.H3GRPC
-                        }
-                    }
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = { Text("Host") },
-                    placeholder = { Text("留空则同服务器地址（CDN 域名 / HTTP Host 头）") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                when (transportMode) {
-                    EWPNode.TransportMode.WS -> {
-                        OutlinedTextField(
-                            value = wsPath,
-                            onValueChange = { wsPath = it },
-                            label = { Text("路径 (Path)") },
-                            placeholder = { Text("/ws 或 /uuid") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                    }
-                    EWPNode.TransportMode.GRPC -> {
-                        OutlinedTextField(
-                            value = grpcServiceName,
-                            onValueChange = { grpcServiceName = it },
-                            label = { Text("服务名 (ServiceName)") },
-                            placeholder = { Text("ProxyService") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = userAgent,
-                            onValueChange = { userAgent = it },
-                            label = { Text("User-Agent") },
-                            placeholder = { Text("留空使用默认浏览器 UA") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                    }
-                    EWPNode.TransportMode.XHTTP -> {
-                        DropdownRow(
-                            label = "模式",
-                            options = listOf("auto", "stream-one（双向流）", "stream-down（分离上下行）"),
-                            selectedIndex = when (xhttpMode) {
-                                "stream-one" -> 1
-                                "stream-down" -> 2
-                                else -> 0
-                            },
-                            onSelectionChange = {
-                                xhttpMode = when (it) {
-                                    1 -> "stream-one"
-                                    2 -> "stream-down"
-                                    else -> "auto"
-                                }
-                            }
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = xhttpPath,
-                            onValueChange = { xhttpPath = it },
-                            label = { Text("路径") },
-                            placeholder = { Text("/xhttp") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                    }
-                    EWPNode.TransportMode.H3GRPC -> {
-                        OutlinedTextField(
-                            value = grpcServiceName,
-                            onValueChange = { grpcServiceName = it },
-                            label = { Text("服务名 (ServiceName)") },
-                            placeholder = { Text("ProxyService") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = userAgent,
-                            onValueChange = { userAgent = it },
-                            label = { Text("User-Agent") },
-                            placeholder = { Text("留空使用默认浏览器 UA") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = contentType,
-                            onValueChange = { contentType = it },
-                            label = { Text("Content-Type") },
-                            placeholder = { Text("留空使用默认（仅 H3gRPC 有效）") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                    }
-                }
-            }
-
-            // ── TLS 配置 ──────────────────────────────────────────────
-            ConfigCard(title = "TLS 配置") {
-                SwitchRow("启用 TLS", "加密传输", enableTLS) { enableTLS = it }
-
-                if (enableTLS) {
-                    Spacer(Modifier.height(8.dp))
-
-                    OutlinedTextField(
-                        value = sni,
-                        onValueChange = { sni = it },
-                        label = { Text("SNI") },
-                        placeholder = { Text("留空则同 Host（TLS 握手域名）") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    DropdownRow(
-                        label = "最低 TLS 版本",
-                        options = listOf("TLS 1.2", "TLS 1.3"),
-                        selectedIndex = if (minTLSVersion == "1.3") 1 else 0,
-                        onSelectionChange = {
-                            if (!enableECH) minTLSVersion = if (it == 1) "1.3" else "1.2"
-                        },
-                        enabled = !enableECH
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    SwitchRow("内置 Mozilla 根证书", "强制使用内置 CA 列表提高安全性", enableMozillaCA) { enableMozillaCA = it }
-
-                    Spacer(Modifier.height(8.dp))
-
-                    SwitchRow("后量子加密 (PQC)", "X25519MLKEM768", enablePQC) { enablePQC = it }
-
-                    Spacer(Modifier.height(4.dp))
-
-                    SwitchRow("启用 ECH", "Encrypted Client Hello（自动锁定 TLS 1.3）", enableECH) {
-                        enableECH = it
-                        if (it) minTLSVersion = "1.3"
-                    }
-
-                    if (enableECH) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = echDomain,
-                            onValueChange = { echDomain = it },
-                            label = { Text("ECH Config 域名") },
-                            placeholder = { Text("cloudflare-ech.com") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = dnsServer,
-                            onValueChange = { dnsServer = it },
-                            label = { Text("DoH 服务器") },
-                            placeholder = { Text("223.5.5.5/dns-query") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-        }
-    }
-}
-
-@Composable
-private fun ConfigCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary
+            // ---------- 基本 ----------
+            Text("基本", style = MaterialTheme.typography.titleSmall)
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("名称") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
             )
-            Spacer(Modifier.height(12.dp))
-            content()
-        }
-    }
-}
-
-@Composable
-private fun SwitchRow(label: String, subtitle: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(label, style = MaterialTheme.typography.bodyLarge)
-            if (subtitle.isNotEmpty()) {
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun DropdownRow(
-    label: String,
-    options: List<String>,
-    selectedIndex: Int,
-    onSelectionChange: (Int) -> Unit,
-    enabled: Boolean = true
-) {
-    var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { if (enabled) expanded = !expanded }
-    ) {
-        OutlinedTextField(
-            value = options[selectedIndex],
-            onValueChange = {},
-            readOnly = true,
-            label = { Text(label) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .menuAnchor(),
-            enabled = enabled
-        )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEachIndexed { index, option ->
-                DropdownMenuItem(
-                    text = { Text(option) },
-                    onClick = {
-                        onSelectionChange(index)
-                        expanded = false
-                    }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = serverAddress,
+                    onValueChange = { serverAddress = it },
+                    label = { Text("服务器地址") },
+                    modifier = Modifier.weight(2f),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = serverPort,
+                    onValueChange = { serverPort = it.filter { c -> c.isDigit() }.take(5) },
+                    label = { Text("端口") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
             }
+            OutlinedTextField(
+                value = host,
+                onValueChange = { host = it },
+                label = { Text("Host (可选, CDN 场景)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = sni,
+                onValueChange = { sni = it },
+                label = { Text("SNI (可选, 默认同 Host)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+
+            HorizontalDivider()
+
+            // ---------- 认证 ----------
+            Text("认证", style = MaterialTheme.typography.titleSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = uuid,
+                    onValueChange = { uuid = it.lowercase() },
+                    label = { Text("UUID (32 hex)") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                )
+                Spacer(Modifier.width(8.dp))
+                IconButton(onClick = {
+                    uuid = java.util.UUID.randomUUID().toString().replace("-", "")
+                }) {
+                    Icon(Icons.Default.Refresh, contentDescription = "随机生成")
+                }
+            }
+
+            HorizontalDivider()
+
+            // ---------- 传输 ----------
+            Text("传输", style = MaterialTheme.typography.titleSmall)
+            val modes = listOf(
+                EWPNode.TransportMode.WS to "WebSocket",
+                EWPNode.TransportMode.GRPC to "gRPC",
+                EWPNode.TransportMode.XHTTP to "XHTTP",
+                EWPNode.TransportMode.H3GRPC to "H3gRPC",
+            )
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                modes.forEachIndexed { idx, (m, label) ->
+                    SegmentedButton(
+                        selected = transportMode == m,
+                        onClick = { transportMode = m },
+                        shape = SegmentedButtonDefaults.itemShape(idx, modes.size),
+                    ) { Text(label) }
+                }
+            }
+            when (transportMode) {
+                EWPNode.TransportMode.WS -> OutlinedTextField(
+                    value = wsPath, onValueChange = { wsPath = it },
+                    label = { Text("WS 路径") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                )
+                EWPNode.TransportMode.GRPC, EWPNode.TransportMode.H3GRPC -> OutlinedTextField(
+                    value = grpcServiceName, onValueChange = { grpcServiceName = it },
+                    label = { Text("gRPC 服务名") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                )
+                EWPNode.TransportMode.XHTTP -> OutlinedTextField(
+                    value = xhttpPath, onValueChange = { xhttpPath = it },
+                    label = { Text("XHTTP 路径") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                )
+            }
+
+            HorizontalDivider()
+
+            // ---------- ECH / DNS ----------
+            Text("ECH 与 DNS", style = MaterialTheme.typography.titleSmall)
+            ListItem(
+                headlineContent = { Text("启用 ECH") },
+                supportingContent = { Text("加密 ClientHello,隐藏 SNI") },
+                trailingContent = {
+                    Switch(checked = enableECH, onCheckedChange = { enableECH = it })
+                },
+            )
+            OutlinedTextField(
+                value = dohServers,
+                onValueChange = { dohServers = it },
+                label = { Text("DoH 服务器 (可选, 逗号分隔)") },
+                placeholder = { Text("默认: AliDNS + DNSPod") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = false,
+                supportingText = { Text("用于解析服务器域名 + ECH bootstrap. 留空走内置中国友好默认 (223.5.5.5 / 223.6.6.6 / doh.pub)") },
+            )
+
+            Spacer(Modifier.height(24.dp))
         }
     }
 }

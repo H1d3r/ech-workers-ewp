@@ -1,228 +1,105 @@
+// EWP v2 share-link encoding.
+//
+// Schema (single line):
+//   ewp://<uuid>@<host>:<port>?
+//       net=ws|grpc|xhttp|h3grpc&
+//       path=<urlencoded>&
+//       host=<authority>&
+//       sni=<sni>&
+//       ech=0|1&
+//       doh=<csv-urlencoded>
+//   #<name>
+//
+// Anything from v1 (appProtocol=trojan, password, flow, pqc, tls,
+// xhttpMode, userAgent, contentType, dnsServer alias, echDomain
+// override) is silently dropped — they have no v2 equivalent and
+// keeping them in the URL would mislead users into thinking those
+// knobs still mattered.
+//
+// Inbound parsing tolerates legacy params on a best-effort basis:
+// we map `dns=` → `doh=`, `tls=0` → reject the link, otherwise
+// quietly ignore unknown query items.
+
 #include "ShareLink.h"
+
 #include <QUrl>
 #include <QUrlQuery>
+#include <QStringList>
 #include <QRegularExpression>
 
 QList<EWPNode> ShareLink::parseLinks(const QString &text)
 {
-    QList<EWPNode> nodes;
-    
-    QStringList lines = text.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
-    
-    for (const auto &line : lines) {
-        QString trimmed = line.trimmed();
-        if (trimmed.startsWith("ewp://")) {
-            EWPNode node = parseLink(trimmed);
-            if (node.isValid()) {
-                nodes.append(node);
-            }
-        }
+    QList<EWPNode> out;
+    const QStringList lines = text.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith('#')) continue;
+        EWPNode n = parseLink(trimmed);
+        if (!n.uuid.isEmpty() && !n.server.isEmpty()) out.append(n);
     }
-    
-    return nodes;
+    return out;
 }
 
 EWPNode ShareLink::parseLink(const QString &link)
 {
     EWPNode node;
-    
-    if (!link.startsWith("ewp://")) {
-        return node;
-    }
-    
+
     QUrl url(link);
-    if (!url.isValid()) {
-        return node;
-    }
-    
-    QString credential = url.userName();
-    if (credential.isEmpty()) {
-        return node;
-    }
-    
-    // P1-20: Strict validation - server address
-    QString server = url.host();
-    if (server.isEmpty()) {
-        return node;
-    }
-    
-    // P1-20: Strict validation - port range
-    int port = url.port(443);
-    if (port < 1 || port > 65535) {
-        return node;
-    }
-    
-    // P1-20: Strict validation - domain/host (ASCII/IDN safe characters)
-    // Allow alphanumeric, dots, hyphens, and IPv6 brackets
-    QRegularExpression domainRegex("^[a-zA-Z0-9.\\-\\[\\]:]+$");
-    if (!domainRegex.match(server).hasMatch()) {
-        return node;
-    }
-    
-    // 服务器地址（实际连接目标）和端口
-    node.server = server;
-    node.serverPort = port;
-    
-    // 解析节点名称
-    node.name = url.fragment();
-    if (node.name.isEmpty()) {
-        node.name = node.server;
-    }
-    
-    // 解析查询参数
-    QUrlQuery query(url);
-    
-    // 判断应用层协议
-    QString protocol = query.queryItemValue("protocol");
-    if (protocol == "trojan") {
-        node.appProtocol = EWPNode::TROJAN;
-        // P1-20: Trojan password - basic length check (non-empty, reasonable max)
-        if (credential.length() > 256) {
-            return node;
-        }
-        node.trojanPassword = credential;
-    } else {
-        node.appProtocol = EWPNode::EWP;
-        // P1-20: Strict UUID validation (RFC 4122 format)
-        // UUID should be 36 chars: 8-4-4-4-12 with hyphens
-        QRegularExpression uuidRegex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
-        if (!uuidRegex.match(credential).hasMatch()) {
-            return node;
-        }
-        node.uuid = credential;
-    }
-    
-    // 传输模式
-    QString mode = query.queryItemValue("mode");
-    if (mode == "grpc") {
-        node.transportMode = EWPNode::GRPC;
-    } else if (mode == "h3grpc") {
-        node.transportMode = EWPNode::H3GRPC;
-    } else if (mode == "xhttp") {
-        node.transportMode = EWPNode::XHTTP;
-    } else {
-        node.transportMode = EWPNode::WS;
-    }
-    
-    // WebSocket 路径
-    QString wsPath = query.queryItemValue("wsPath");
-    if (!wsPath.isEmpty()) {
-        // P1-20: Path validation - must start with / and contain safe characters
-        if (!wsPath.startsWith("/") || wsPath.length() > 256) {
-            return node;
-        }
-        QRegularExpression pathRegex("^[a-zA-Z0-9/_\\-\\.]+$");
-        if (!pathRegex.match(wsPath).hasMatch()) {
-            return node;
-        }
-        node.wsPath = wsPath;
-    }
-    
-    // gRPC / H3gRPC 服务名
-    QString grpcService = query.queryItemValue("grpcService");
-    if (!grpcService.isEmpty()) {
-        // P1-20: Service name validation - alphanumeric and dots only
-        if (grpcService.length() > 128) {
-            return node;
-        }
-        QRegularExpression serviceRegex("^[a-zA-Z0-9\\.]+$");
-        if (!serviceRegex.match(grpcService).hasMatch()) {
-            return node;
-        }
-        node.grpcServiceName = grpcService;
-    }
-    
-    QString hostHeader = query.queryItemValue("host");
-    if (!hostHeader.isEmpty()) {
-        // P1-20: Host header validation
-        if (hostHeader.length() > 256) {
-            return node;
-        }
-        QRegularExpression hostRegex("^[a-zA-Z0-9.\\-]+$");
-        if (!hostRegex.match(hostHeader).hasMatch()) {
-            return node;
-        }
-        node.host = hostHeader;
+    if (!url.isValid() || url.scheme().toLower() != "ewp") return node;
+
+    const QString uuid = url.userName();
+    const QString host = url.host();
+    if (uuid.isEmpty() || host.isEmpty()) return node;
+
+    // Light validation: 32 hex chars exactly. Anything else is junk.
+    static const QRegularExpression hexRe("^[0-9a-fA-F]{32}$");
+    if (!hexRe.match(uuid).hasMatch()) return node;
+
+    node.uuid       = uuid.toLower();
+    node.server     = host;
+    node.serverPort = url.port(443);
+
+    if (!url.fragment().isEmpty()) {
+        node.name = QUrl::fromPercentEncoding(url.fragment().toUtf8());
     }
 
-    // TLS 配置
-    node.enableTLS = query.queryItemValue("tls") != "0";
-    QString sni = query.queryItemValue("sni");
-    if (!sni.isEmpty()) {
-        // P1-20: SNI validation
-        if (sni.length() > 256) {
-            return node;
+    QUrlQuery q(url);
+
+    const QString net = q.queryItemValue("net").toLower();
+    if      (net == "grpc")             node.transportMode = EWPNode::GRPC;
+    else if (net == "xhttp")            node.transportMode = EWPNode::XHTTP;
+    else if (net == "h3" || net == "h3grpc") node.transportMode = EWPNode::H3GRPC;
+    else                                node.transportMode = EWPNode::WS;
+
+    const QString path = QUrl::fromPercentEncoding(q.queryItemValue("path").toUtf8());
+    if (!path.isEmpty()) {
+        switch (node.transportMode) {
+            case EWPNode::WS:     node.wsPath = path; break;
+            case EWPNode::GRPC:   node.grpcServiceName = path; break;
+            case EWPNode::XHTTP:  node.xhttpPath = path; break;
+            case EWPNode::H3GRPC: node.grpcServiceName = path; break;
         }
-        QRegularExpression sniRegex("^[a-zA-Z0-9.\\-]+$");
-        if (!sniRegex.match(sni).hasMatch()) {
-            return node;
-        }
-        node.sni = sni;
-    }
-    QString tlsVer = query.queryItemValue("tlsVer");
-    if (!tlsVer.isEmpty()) {
-        // P1-20: TLS version validation
-        if (tlsVer != "1.2" && tlsVer != "1.3") {
-            return node;
-        }
-        node.minTLSVersion = tlsVer;
     }
 
-    // ECH 配置
-    node.enableECH = query.queryItemValue("ech") == "1";
-    QString echDomain = query.queryItemValue("echDomain");
-    if (!echDomain.isEmpty()) {
-        // P1-20: ECH domain validation
-        if (echDomain.length() > 256) {
-            return node;
-        }
-        QRegularExpression echRegex("^[a-zA-Z0-9.\\-]+$");
-        if (!echRegex.match(echDomain).hasMatch()) {
-            return node;
-        }
-        node.echDomain = echDomain;
+    if (q.hasQueryItem("host")) node.host = q.queryItemValue("host");
+    if (q.hasQueryItem("sni"))  node.sni  = q.queryItemValue("sni");
+
+    // ECH defaults to true; only an explicit "0" turns it off.
+    if (q.hasQueryItem("ech")) node.enableECH = q.queryItemValue("ech") != "0";
+
+    // DoH list — accept both v2 `doh=` and legacy `dns=` aliases.
+    QString doh = q.queryItemValue("doh");
+    if (doh.isEmpty()) doh = q.queryItemValue("dns");
+    if (!doh.isEmpty()) node.dohServers = QUrl::fromPercentEncoding(doh.toUtf8());
+
+    // Legacy guard: a v1 share link with tls=0 (no TLS) is incompatible
+    // with v2's mandatory TLS-1.3 floor; refuse to import it so the
+    // user is not silently upgraded to "your old plaintext config now
+    // has TLS forced on".
+    if (q.queryItemValue("tls") == "0") {
+        return EWPNode{};
     }
-    QString dnsServer = query.queryItemValue("dns");
-    if (!dnsServer.isEmpty()) {
-        // P1-20: DNS server validation (domain or URL)
-        if (dnsServer.length() > 512) {
-            return node;
-        }
-        // Allow alphanumeric, dots, hyphens, slashes, colons for DoH URLs
-        QRegularExpression dnsRegex("^[a-zA-Z0-9.\\-/:]+$");
-        if (!dnsRegex.match(dnsServer).hasMatch()) {
-            return node;
-        }
-        node.dnsServer = dnsServer;
-    }
-    
-    // 高级配置
-    node.enableFlow = query.queryItemValue("flow") != "0";
-    node.enablePQC = query.queryItemValue("pqc") == "1";
-    
-    // XHTTP 配置
-    QString xhttpMode = query.queryItemValue("xhttpMode");
-    if (!xhttpMode.isEmpty()) {
-        // P1-20: XHTTP mode validation
-        if (xhttpMode != "auto" && xhttpMode != "stream-up" && 
-            xhttpMode != "stream-down" && xhttpMode != "stream-one") {
-            return node;
-        }
-        node.xhttpMode = xhttpMode;
-    }
-    QString xhttpPath = query.queryItemValue("xhttpPath");
-    if (!xhttpPath.isEmpty()) {
-        // P1-20: XHTTP path validation
-        if (!xhttpPath.startsWith("/") || xhttpPath.length() > 256) {
-            return node;
-        }
-        QRegularExpression xpathRegex("^[a-zA-Z0-9/_\\-\\.]+$");
-        if (!xpathRegex.match(xhttpPath).hasMatch()) {
-            return node;
-        }
-        node.xhttpPath = xhttpPath;
-    }
-    
+
     return node;
 }
 
@@ -230,89 +107,36 @@ QString ShareLink::generateLink(const EWPNode &node)
 {
     QUrl url;
     url.setScheme("ewp");
-    
-    // 根据应用层协议设置凭据
-    if (node.appProtocol == EWPNode::TROJAN) {
-        url.setUserName(node.trojanPassword);
-    } else {
-        url.setUserName(node.uuid);
-    }
-    
+    url.setUserName(node.uuid);
     url.setHost(node.server);
-    url.setPort(node.serverPort);
-    url.setFragment(node.name);
-    
-    QUrlQuery query;
-    
-    // 应用层协议（非 EWP 时需要标注）
-    if (node.appProtocol == EWPNode::TROJAN) {
-        query.addQueryItem("protocol", "trojan");
-    }
-    
-    // 传输模式
+    if (node.serverPort != 443) url.setPort(node.serverPort);
+    url.setPath("/");
+
+    QUrlQuery q;
+
+    const char *net = "ws";
+    QString path;
     switch (node.transportMode) {
-        case EWPNode::GRPC:
-            query.addQueryItem("mode", "grpc");
-            if (node.grpcServiceName != "ProxyService") {
-                query.addQueryItem("grpcService", node.grpcServiceName);
-            }
-            break;
-        case EWPNode::H3GRPC:
-            query.addQueryItem("mode", "h3grpc");
-            if (node.grpcServiceName != "ProxyService") {
-                query.addQueryItem("grpcService", node.grpcServiceName);
-            }
-            break;
-        case EWPNode::XHTTP:
-            query.addQueryItem("mode", "xhttp");
-            break;
-        default:
-            query.addQueryItem("mode", "ws");
-            if (node.wsPath != "/") {
-                query.addQueryItem("wsPath", node.wsPath);
-            }
-            break;
+        case EWPNode::WS:     net = "ws";     path = node.wsPath;          break;
+        case EWPNode::GRPC:   net = "grpc";   path = node.grpcServiceName; break;
+        case EWPNode::XHTTP:  net = "xhttp";  path = node.xhttpPath;       break;
+        case EWPNode::H3GRPC: net = "h3grpc"; path = node.grpcServiceName; break;
     }
-    
-    // Host 头（非空且不同于连接目标时才写入）
-    if (!node.host.isEmpty()) {
-        query.addQueryItem("host", node.host);
+    q.addQueryItem("net", net);
+    if (!path.isEmpty() && path != "/") {
+        q.addQueryItem("path", QString::fromUtf8(QUrl::toPercentEncoding(path)));
+    }
+    if (!node.host.isEmpty()) q.addQueryItem("host", node.host);
+    if (!node.sni.isEmpty())  q.addQueryItem("sni",  node.sni);
+    if (!node.enableECH)      q.addQueryItem("ech",  "0");
+
+    if (!node.dohServers.isEmpty()) {
+        q.addQueryItem("doh", QString::fromUtf8(QUrl::toPercentEncoding(node.dohServers)));
     }
 
-    // TLS 配置
-    if (!node.enableTLS) {
-        query.addQueryItem("tls", "0");
+    url.setQuery(q);
+    if (!node.name.isEmpty()) {
+        url.setFragment(QString::fromUtf8(QUrl::toPercentEncoding(node.name)));
     }
-    if (!node.sni.isEmpty()) {
-        query.addQueryItem("sni", node.sni);
-    }
-    if (node.minTLSVersion == "1.3") {
-        query.addQueryItem("tlsVer", "1.3");
-    }
-
-    // ECH 配置
-    query.addQueryItem("ech", node.enableECH ? "1" : "0");
-    if (node.enableECH && node.echDomain != "cloudflare-ech.com") {
-        query.addQueryItem("echDomain", node.echDomain);
-    }
-    if (node.enableECH && node.dnsServer != "223.5.5.5/dns-query") {
-        query.addQueryItem("dns", node.dnsServer);
-    }
-    
-    // 高级配置
-    query.addQueryItem("flow", node.enableFlow ? "1" : "0");
-    query.addQueryItem("pqc", node.enablePQC ? "1" : "0");
-    
-    // XHTTP 配置
-    if (node.transportMode == EWPNode::XHTTP) {
-        if (node.xhttpMode != "auto") {
-            query.addQueryItem("xhttpMode", node.xhttpMode);
-        }
-        if (node.xhttpPath != "/xhttp") {
-            query.addQueryItem("xhttpPath", node.xhttpPath);
-        }
-    }
-    
-    url.setQuery(query);
-    return url.toString();
+    return url.toString(QUrl::FullyEncoded);
 }

@@ -3,6 +3,8 @@ package com.echworkers.android.model
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+private val statsJson = Json { ignoreUnknownKeys = true }
+
 sealed class VpnState {
     object Disconnected : VpnState()
     object Connecting : VpnState()
@@ -22,18 +24,14 @@ data class VpnStats(
     val connections: Long = 0,
     val serverAddr: String = "",
     val protocol: String = "",
-    val appProtocol: String = "",
-    val enableEch: Boolean = false,
-    val enableFlow: Boolean = false,
-    val tunMtu: Int = 0
+    val ech: Boolean = false,
+    val tunMTU: Int = 0,
 ) {
     companion object {
-        fun fromJson(json: String): VpnStats {
-            return try {
-                Json.decodeFromString(json)
-            } catch (e: Exception) {
-                VpnStats()
-            }
+        fun fromJson(json: String): VpnStats = try {
+            statsJson.decodeFromString(json)
+        } catch (_: Exception) {
+            VpnStats()
         }
     }
     

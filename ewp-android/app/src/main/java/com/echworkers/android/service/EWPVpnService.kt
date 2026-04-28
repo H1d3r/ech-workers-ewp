@@ -158,58 +158,25 @@ class EWPVpnService : VpnService(), SocketProtector {
             EWPNode.TransportMode.XHTTP -> "xhttp"
             EWPNode.TransportMode.H3GRPC -> "h3grpc"
         }
-        
         val path = when (node.transportMode) {
             EWPNode.TransportMode.WS -> node.wsPath
             EWPNode.TransportMode.GRPC -> node.grpcServiceName
             EWPNode.TransportMode.XHTTP -> node.xhttpPath
             EWPNode.TransportMode.H3GRPC -> node.grpcServiceName
         }
-        
         val serverAddr = "${node.serverAddress}:${node.serverPort}"
-        
-        val builder = if (node.appProtocol == EWPNode.AppProtocol.TROJAN) {
-            Ewpmobile.newVPNConfig(serverAddr, "")
-                .setPassword(node.password)
-                .setAppProtocol("trojan")
-        } else {
-            Ewpmobile.newVPNConfig(serverAddr, node.uuid)
-        }
-        
-        return builder.apply {
+
+        // v2 builder: PQC, TLS 1.3, Mozilla CA bundle and EWP app
+        // protocol are baked in — there are no setters for those any
+        // more. Trojan is gone entirely. Flow padding is gone.
+        return Ewpmobile.newVPNConfig(serverAddr, node.uuid).apply {
             setProtocol(protocol)
             setPath(path)
-            
-            if (node.host.isNotEmpty()) {
-                setHost(node.host)
-            }
-            if (node.sni.isNotEmpty()) {
-                setSNI(node.sni)
-            }
-            
-            setEnableTLS(node.enableTLS)
-            setMinTLSVersion(node.minTLSVersion)
-            
+            if (node.host.isNotEmpty()) setHost(node.host)
+            if (node.sni.isNotEmpty()) setSNI(node.sni)
             setEnableECH(node.enableECH)
-            if (node.enableECH) {
-                setECHDomain(node.echDomain)
-                setDNSServer(node.dnsServer)
-            }
-            
-            if (node.transportMode == EWPNode.TransportMode.XHTTP && node.xhttpMode.isNotEmpty()) {
-                setXhttpMode(node.xhttpMode)
-            }
-            if (node.userAgent.isNotEmpty()) {
-                setUserAgent(node.userAgent)
-            }
-            if (node.transportMode == EWPNode.TransportMode.H3GRPC && node.contentType.isNotEmpty()) {
-                setContentType(node.contentType)
-            }
-            
-            setEnableFlow(node.enableFlow)
-            setEnablePQC(node.enablePQC)
-            setEnableMozillaCA(node.enableMozillaCA)
-            setTunMTU(VPN_MTU.toLong())
+            if (node.dohServers.isNotBlank()) setDoHServers(node.dohServers)
+            setTUNMTU(VPN_MTU.toLong())
         }.build()
     }
     

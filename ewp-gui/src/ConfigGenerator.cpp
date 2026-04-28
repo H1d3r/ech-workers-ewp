@@ -4,241 +4,150 @@
 #include <QFile>
 #include <QDebug>
 
-QJsonObject ConfigGenerator::generateClientConfig(const EWPNode &node, const SettingsDialog::AppSettings &settings, bool tunMode)
+// =====================================================================
+// Public API
+// =====================================================================
+
+QJsonObject ConfigGenerator::generateClientConfig(const EWPNode &node,
+                                                  const SettingsDialog::AppSettings &settings,
+                                                  bool tunMode)
 {
-    QJsonObject config;
-    
-    config["log"] = generateLog();
-    
-    QJsonArray inbounds;
-    inbounds.append(generateInbound(settings, tunMode));
-    config["inbounds"] = inbounds;
-    
-    QJsonArray outbounds;
-    outbounds.append(generateOutbound(node));
-    config["outbounds"] = outbounds;
-    
-    config["route"] = generateRoute();
-    
-    return config;
+    QJsonObject cfg;
+    cfg["inbounds"]  = generateInbounds(settings, tunMode);
+
+    QJsonArray outs;
+    outs.append(generateOutbound(node));
+    cfg["outbounds"] = outs;
+
+    cfg["router"] = generateRouter();
+    cfg["client"] = generateClient(node);
+    return cfg;
 }
 
-QString ConfigGenerator::generateConfigFile(const EWPNode &node, const SettingsDialog::AppSettings &settings, bool tunMode)
+QString ConfigGenerator::generateConfigFile(const EWPNode &node,
+                                            const SettingsDialog::AppSettings &settings,
+                                            bool tunMode)
 {
-    QJsonObject config = generateClientConfig(node, settings, tunMode);
-    QJsonDocument doc(config);
+    QJsonDocument doc(generateClientConfig(node, settings, tunMode));
     return QString::fromUtf8(doc.toJson(QJsonDocument::Indented));
 }
 
 bool ConfigGenerator::saveConfig(const QJsonObject &config, const QString &filePath)
 {
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    QFile f(filePath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
         qWarning() << "Failed to open config file for writing:" << filePath;
         return false;
     }
-    
     QJsonDocument doc(config);
-    file.write(doc.toJson(QJsonDocument::Indented));
-    file.close();
-    
+    f.write(doc.toJson(QJsonDocument::Indented));
+    f.close();
     return true;
 }
 
-QJsonObject ConfigGenerator::generateLog()
+// =====================================================================
+// Inbound (TUN or SOCKS5)
+// =====================================================================
+
+QJsonArray ConfigGenerator::generateInbounds(const SettingsDialog::AppSettings &settings, bool tunMode)
 {
-    QJsonObject log;
-    log["level"] = "info";
-    log["timestamp"] = true;
-    return log;
+    QJsonArray arr;
+    QJsonObject in;
+    if (tunMode) {
+        in["tag"]      = "tun-in";
+        in["type"]     = "tun";
+        in["ipv4"]     = settings.tunIP;          // e.g. "10.233.0.2/24"
+        in["ipv4_dns"] = settings.tunnelDNS;
+        if (!settings.tunnelDNSv6.isEmpty()) in["ipv6_dns"] = settings.tunnelDNSv6;
+        in["mtu"]      = settings.tunMTU;
+        in["fake_ip"]  = true;
+    } else {
+        in["tag"]    = "local-socks";
+        in["type"]   = "socks5";
+        in["listen"] = settings.listenAddr;       // e.g. "127.0.0.1:1080"
+    }
+    arr.append(in);
+    return arr;
 }
 
-QJsonObject ConfigGenerator::generateInbound(const SettingsDialog::AppSettings &settings, bool tunMode)
-{
-    QJsonObject inbound;
-    
-    if (tunMode) {
-        inbound["type"] = "tun";
-        inbound["tag"] = "tun-in";
-        inbound["inet4_address"] = settings.tunIP;
-        inbound["mtu"] = settings.tunMTU;
-        inbound["auto_route"] = settings.tunAutoRoute;
-        inbound["strict_route"] = settings.tunStrictRoute;
-        inbound["stack"] = settings.tunStack;
-        
-        if (!settings.tunnelDNS.isEmpty()) {
-            inbound["dns"] = settings.tunnelDNS.trimmed();
-        }
-        if (!settings.tunnelDNSv6.isEmpty()) {
-            inbound["ipv6_dns"] = settings.tunnelDNSv6.trimmed();
-        }
-        if (!settings.tunnelDoHServer.isEmpty()) {
-            inbound["tunnel_doh_server"] = settings.tunnelDoHServer.trimmed();
-        }
-    } else {
-        inbound["type"] = "mixed";
-        inbound["tag"] = "mixed-in";
-        inbound["listen"] = settings.listenAddr;
-        inbound["udp"] = true;
-    }
-    
-    return inbound;
-}
+// =====================================================================
+// Outbound (always ewpclient in v2)
+// =====================================================================
 
 QJsonObject ConfigGenerator::generateOutbound(const EWPNode &node)
 {
-    QJsonObject outbound;
-    
-    outbound["type"] = (node.appProtocol == EWPNode::TROJAN) ? "trojan" : "ewp";
-    outbound["tag"] = "proxy-out";
-    outbound["server"] = node.server;
-    outbound["server_port"] = node.serverPort;
-
-    if (!node.host.isEmpty()) {
-        outbound["host"] = node.host;
-    }
-    
-    if (node.appProtocol == EWPNode::TROJAN) {
-        outbound["password"] = node.trojanPassword;
-    } else {
-        outbound["uuid"] = node.uuid;
-    }
-    
-    outbound["transport"] = generateTransport(node);
-    outbound["tls"] = generateTLS(node);
-    
-    if (node.appProtocol == EWPNode::EWP && node.enableFlow) {
-        outbound["flow"] = generateFlow(node);
-    }
-    
-    return outbound;
+    QJsonObject out;
+    out["tag"]  = "proxy-out";
+    out["type"] = "ewpclient";
+    out["uuid"] = node.uuid;
+    out["transport"] = generateTransport(node);
+    return out;
 }
 
 QJsonObject ConfigGenerator::generateTransport(const EWPNode &node)
 {
-    QJsonObject transport;
-    
+    QJsonObject t;
+    const char *kind = "websocket";
+    QString path     = node.wsPath;
+    QString scheme   = "wss";
     switch (node.transportMode) {
-        case EWPNode::WS:
-            transport["type"] = "ws";
-            transport["path"] = node.wsPath;
-            break;
-            
-        case EWPNode::GRPC:
-            transport["type"] = "grpc";
-            transport["service_name"] = node.grpcServiceName;
-            if (!node.userAgent.isEmpty()) {
-                transport["user_agent"] = node.userAgent;
-            }
-            break;
-            
-        case EWPNode::XHTTP:
-            transport["type"] = "xhttp";
-            transport["path"] = node.xhttpPath;
-            transport["mode"] = node.xhttpMode;
-            break;
-            
-        case EWPNode::H3GRPC:
-            transport["type"] = "h3grpc";
-            transport["service_name"] = node.grpcServiceName;
-            if (!node.userAgent.isEmpty()) {
-                transport["user_agent"] = node.userAgent;
-            }
-            if (!node.contentType.isEmpty()) {
-                transport["content_type"] = node.contentType;
-            }
-            
-            QJsonObject grpcWeb;
-            grpcWeb["mode"] = "binary";
-            grpcWeb["max_message_size"] = 4194304;
-            grpcWeb["compression"] = "none";
-            transport["grpc_web"] = grpcWeb;
-            
-            transport["concurrency"] = 4;
-            
-            QJsonObject quic;
-            quic["initial_stream_window_size"] = 6291456;
-            quic["max_stream_window_size"] = 16777216;
-            quic["initial_connection_window_size"] = 15728640;
-            quic["max_connection_window_size"] = 25165824;
-            quic["max_idle_timeout"] = "30s";
-            quic["keep_alive_period"] = "10s";
-            quic["disable_path_mtu_discovery"] = false;
-            transport["quic"] = quic;
-            break;
+        case EWPNode::WS:     kind = "websocket"; path = node.wsPath;          scheme = "wss";   break;
+        case EWPNode::GRPC:   kind = "grpc";      path = node.grpcServiceName; scheme = "grpcs"; break;
+        case EWPNode::XHTTP:  kind = "xhttp";     path = node.xhttpPath;       scheme = "https"; break;
+        case EWPNode::H3GRPC: kind = "h3grpc";    path = node.grpcServiceName; scheme = "h3";    break;
     }
-    
-    return transport;
+
+    t["kind"] = QString::fromUtf8(kind);
+
+    // url field as understood by cmd/ewp/cfg/build.go::splitURL
+    QString hostForURL = node.host.isEmpty() ? node.server : node.host;
+    QString url = QString("%1://%2:%3%4")
+                      .arg(scheme)
+                      .arg(hostForURL)
+                      .arg(node.serverPort)
+                      .arg(path.startsWith('/') || kind == QStringLiteral("grpc") || kind == QStringLiteral("h3grpc")
+                               ? path
+                               : "/" + path);
+    t["url"] = url;
+
+    if (!node.host.isEmpty()) t["host"] = node.host;
+    QString sni = node.effectiveSNI();
+    if (!sni.isEmpty())       t["sni"]  = sni;
+
+    t["ech"] = node.enableECH;
+    return t;
 }
 
-QJsonObject ConfigGenerator::generateTLS(const EWPNode &node)
+// =====================================================================
+// Router (single default outbound — v2 has no rule engine yet)
+// =====================================================================
+
+QJsonObject ConfigGenerator::generateRouter()
 {
-    QJsonObject tls;
-
-    tls["enabled"] = node.enableTLS;
-    // SNI 回退链：sni → host → server
-    QString sni = node.sni;
-    if (sni.isEmpty()) sni = node.host;
-    if (sni.isEmpty()) sni = node.server;
-    tls["server_name"] = sni;
-    tls["insecure"] = false;
-
-    if (node.minTLSVersion == "1.3") {
-        tls["min_version"] = "1.3";
-    }
-
-    QJsonArray alpn;
-    if (node.transportMode == EWPNode::H3GRPC) {
-        alpn.append("h3");
-    } else if (node.transportMode == EWPNode::GRPC) {
-        alpn.append("h2");
-    } else {
-        alpn.append("http/1.1");
-    }
-    tls["alpn"] = alpn;
-
-    if (node.enableECH) {
-        QJsonObject ech;
-        ech["enabled"] = true;
-        ech["config_domain"] = node.echDomain;
-        ech["doh_server"] = node.dnsServer;
-        ech["fallback_on_error"] = true;
-        tls["ech"] = ech;
-    }
-
-    if (node.enablePQC) {
-        tls["pqc"] = true;
-    }
-    // Bug-D: Field name verified - Core expects "use_mozilla_ca" (snake_case)
-    // which matches the JSON key used here. EWPNode.useMozillaCA (camelCase)
-    // is correctly serialized to "use_mozilla_ca" for Core compatibility.
-    tls["use_mozilla_ca"] = node.useMozillaCA;
-
-    return tls;
+    QJsonObject r;
+    r["default"] = "proxy-out";
+    return r;
 }
 
-QJsonObject ConfigGenerator::generateFlow(const EWPNode &node)
-{
-    Q_UNUSED(node)
-    
-    QJsonObject flow;
-    flow["enabled"] = true;
-    
-    QJsonArray padding;
-    padding.append(900);
-    padding.append(500);
-    padding.append(900);
-    padding.append(256);
-    flow["padding"] = padding;
-    
-    return flow;
-}
+// =====================================================================
+// Client (umbrella DoH list — used by ECH bootstrap + server name DNS)
+// =====================================================================
 
-QJsonObject ConfigGenerator::generateRoute()
+QJsonObject ConfigGenerator::generateClient(const EWPNode &node)
 {
-    QJsonObject route;
-    route["final"] = "proxy-out";
-    route["auto_detect_interface"] = true;
-    route["rules"] = QJsonArray();
-    return route;
+    QJsonObject client;
+    if (!node.dohServers.isEmpty()) {
+        QJsonObject doh;
+        QJsonArray servers;
+        for (const QString &s : node.dohServers.split(',', Qt::SkipEmptyParts)) {
+            QString trimmed = s.trimmed();
+            if (!trimmed.isEmpty()) servers.append(trimmed);
+        }
+        doh["servers"] = servers;
+        client["doh"]  = doh;
+    }
+    // Empty client.doh -> cmd/ewp falls back to its built-in default
+    // (AliDNS + DNSPod + doh.pub), so the GUI does not have to bake
+    // that list in itself.
+    return client;
 }
